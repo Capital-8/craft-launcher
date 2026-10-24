@@ -6,7 +6,7 @@ members = ["crates/*", "apps/*", "xtask"]
 version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.90"
+rust-version = "1.95"
 repository = "https://github.com/storytold/craft-launcher"
 
 [workspace.lints.rust]
@@ -20,10 +20,10 @@ todo = "warn"
 artcraft-launcher-core = { path = "crates/core" }
 artcraft-launcher-ui-egui = { path = "crates/ui-egui" }
 artcraft-launcher-native = { path = "crates/native" }
-egui = "0.36"
-eframe = { version = "0.36", default-features = false }
-egui_extras = { version = "0.36", default-features = false }
-egui_kittest = "0.36"
+egui = { version = "0.37", features = ["monochrome_emoji_fonts"] }
+eframe = { version = "0.37", default-features = false }
+egui_extras = { version = "0.37", default-features = false }
+egui_kittest = "0.37"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 semver = { version = "1", features = ["serde"] }
@@ -46,3 +46,21 @@ inherits = "release"
 opt-level = "s"
 lto = "fat"
 strip = "debuginfo"
+
+# Keep the complete egui family and native event bridge on reviewed fork commits.
+[patch.crates-io]
+ecolor = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+emath = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+epaint = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+epaint_default_fonts = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui-winit = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui-wgpu = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui_glow = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui_extras = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui_kittest = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui_system_font_provider = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+eframe = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui_demo_lib = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+egui_inspection = { git = "https://github.com/storytold/egui.git", rev = "173cc7375d35dc5fbc5b5d0994fdf787f547c5d1" }
+winit = { git = "https://github.com/storytold/winit.git", rev = "ae48c756a3b81125eb796c0cc6dccf60990d1181" }

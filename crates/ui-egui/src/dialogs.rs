@@ -20,7 +20,7 @@ impl LauncherUi {
         // uninstall prompt would open as tall as Settings and never shrink (#88).
         // The large dialogs run their header to the card's edges; the small prompts keep a margin.
         let large = matches!(dialog, Dialog::Settings | Dialog::Notes(_));
-        let modal = egui::Modal::new(egui::Id::new("dialog").with(dialog.key())).frame(if large {
+        let modal = egui::Modal::new(egui::Id::unique("dialog").with(dialog.key())).frame(if large {
             crate::sheet::frame(&t)
         } else {
             egui::Frame::new().fill(t.bg).stroke(egui::Stroke::new(1.0, t.line_strong)).shadow(theme::shadow(&t)).inner_margin(theme::PAD as i8)
@@ -45,7 +45,7 @@ impl LauncherUi {
     fn alert_popup(&mut self, ctx: &egui::Context) {
         let Some(alert) = self.alerts.iter().find(|a| !self.settings.dismissed_notices.contains(&a.id)).cloned() else { return };
         let t = Tokens::get(ctx);
-        let modal = egui::Modal::new(egui::Id::new("feed_alert").with(&alert.id)).frame(
+        let modal = egui::Modal::new(egui::Id::unique("feed_alert").with(&alert.id)).frame(
             egui::Frame::new().fill(t.bg).stroke(egui::Stroke::new(1.0, t.line_strong)).shadow(theme::shadow(&t)).inner_margin(theme::PAD as i8),
         );
         let mut ok = false;
@@ -79,6 +79,8 @@ impl LauncherUi {
         let t = Tokens::get(ui.ctx());
         ui.horizontal(|ui| {
             if let Some(icon) = icon {
+                // The heading beside it carries the title; an icon with the same accessible
+                // name would announce the dialog title twice.
                 ui.add(egui::Image::new(icon).fit_to_exact_size(vec2(40.0, 40.0)));
             }
             ui.add_space(4.0);
@@ -152,7 +154,7 @@ impl LauncherUi {
                         .on_hover_text(tl!("Downloads the new version, replaces this one and opens it again"))
                         .clicked()
                     {
-                        self.send(Command::UpdateLauncher);
+                        self.act_command(Command::UpdateLauncher);
                         close = true;
                     }
                 } else {
@@ -197,7 +199,7 @@ impl LauncherUi {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::button(ui, tl!("Uninstall"), Kind::Danger, 110.0).clicked() {
-                    self.send(Command::Uninstall { app: id.to_string() });
+                    self.act_command(Command::Uninstall { app: id.to_string() });
                     close = true;
                 }
                 if widgets::button(ui, tl!("Cancel"), Kind::Secondary, 90.0).clicked() {
@@ -222,7 +224,7 @@ impl LauncherUi {
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::button(ui, tl!("Replace"), Kind::Danger, 110.0).clicked() {
-                    self.send(Command::Replace { app: id.to_string() });
+                    self.act_command(Command::Replace { app: id.to_string() });
                     close = true;
                 }
                 if widgets::button(ui, tl!("Cancel"), Kind::Secondary, 90.0).clicked() {
@@ -252,7 +254,7 @@ impl LauncherUi {
                     self.settings.install_locations.per_app.insert(id.to_string(), folder.clone());
                 }
                 self.configure();
-                self.send(Command::Install { app: id.to_string() });
+                self.act_command(Command::Install { app: id.to_string() });
                 close = true;
             }
             close |= widgets::button(ui, tl!("Cancel"), Kind::Secondary, 90.0).clicked();

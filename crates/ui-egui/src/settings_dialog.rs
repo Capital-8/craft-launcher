@@ -12,17 +12,29 @@ use crate::theme::{self, ThemeChoice, Tokens};
 use crate::widgets::{self, Cell, Kind};
 
 /// A label with its control at the right; the control drops under the label when they don't fit.
-fn row(ui: &mut Ui, label: &str, control_width: f32, add: &mut dyn FnMut(&mut Ui)) {
+///
+/// The control receives the label's node id so it can be associated with the visible text for
+/// accessibility (0.37's kittest fails unnamed input widgets).
+fn row(ui: &mut Ui, label: &str, control_width: f32, add: &mut dyn FnMut(&mut Ui, egui::Id)) {
     let t = Tokens::get(ui.ctx());
     let font = egui::TextStyle::Body.resolve(ui.style());
     let label_width = ui.painter().layout_no_wrap(label.to_string(), font, t.ink).size().x;
     if label_width + control_width + ui.spacing().item_spacing.x > ui.available_width() {
-        ui.label(label);
-        add(ui);
+        let label = ui.label(label);
+        add(ui, label.id);
     } else {
         ui.horizontal(|ui| {
-            ui.label(label);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| add(ui));
+            let label = ui.label(label);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // A ComboBox grows to the width its layout offers, so leaving it loose made it
+                // start at the label's last glyph and paint over the words at a narrow dialog
+                // width. A fixed-width allocation at the right keeps it clear of the label and
+                // still leaves the dialog itself as narrow as before.
+                let width = control_width.min(ui.available_width());
+                ui.allocate_ui_with_layout(vec2(width, theme::CONTROL_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    add(ui, label.id);
+                });
+            });
         });
     }
 }
@@ -119,14 +131,19 @@ impl LauncherUi {
         let t = Tokens::get(ui.ctx());
         let mut lang_code = self.settings.language.clone();
         let installed = self.cjk_font;
-        sheet::panel(ui, tl!("Language"), |ui| {
+        sheet::panel_with_heading(ui, tl!("Language"), |ui, heading| {
             let width = ui.available_width();
-            egui::ComboBox::from_id_salt("language").selected_text(Settings::language_label(&lang_code, installed)).width(width).show_ui(ui, |ui| {
-                ui.selectable_value(&mut lang_code, Settings::LANGUAGE_AUTO.to_string(), tl!("Auto"));
-                for lang in crate::i18n::Lang::all() {
-                    ui.selectable_value(&mut lang_code, lang.code().to_string(), Settings::language_label(lang.code(), installed));
-                }
-            });
+            egui::ComboBox::from_id_salt("language")
+                .selected_text(Settings::language_label(&lang_code, installed))
+                .width(width)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut lang_code, Settings::LANGUAGE_AUTO.to_string(), tl!("Auto"));
+                    for lang in crate::i18n::Lang::for_picker() {
+                        ui.selectable_value(&mut lang_code, lang.code().to_string(), Settings::language_label(lang.code(), installed));
+                    }
+                })
+                .response
+                .labelled_by(heading);
         });
         if lang_code != self.settings.language {
             self.settings.language = lang_code;
@@ -145,12 +162,17 @@ impl LauncherUi {
     fn settings_updates(&mut self, ui: &mut Ui) {
         sheet::panel(ui, tl!("Updates"), |ui| {
             let mut every = self.settings.check_every;
-            row(ui, tl!("Check for updates"), 150.0, &mut |ui| {
-                egui::ComboBox::from_id_salt("every").selected_text(every.label()).width(150.0).show_ui(ui, |ui| {
-                    for e in CheckEvery::ALL {
-                        ui.selectable_value(&mut every, e, e.label());
-                    }
-                });
+            row(ui, tl!("Check for updates"), 150.0, &mut |ui, label| {
+                egui::ComboBox::from_id_salt("every")
+                    .selected_text(every.label())
+                    .width(150.0)
+                    .show_ui(ui, |ui| {
+                        for e in CheckEvery::ALL {
+                            ui.selectable_value(&mut every, e, e.label());
+                        }
+                    })
+                    .response
+                    .labelled_by(label);
             });
             self.settings.check_every = every;
             if self.caps.manage_apps
@@ -202,13 +224,18 @@ impl LauncherUi {
                 .copied()
                 .filter(|kind| matches!(kind, PackageKind::Msi | PackageKind::PortableZip))
                 .or(Some(PackageKind::Msi));
-            row(ui, tl!("Install new apps as"), 210.0, &mut |ui| {
-                let label = choice.map_or_else(|| crate::i18n::t(PackageKind::Msi.label()), |kind| crate::i18n::t(kind.label()));
-                egui::ComboBox::from_id_salt("windows-kind").selected_text(label).width(210.0).show_ui(ui, |ui| {
-                    for kind in [PackageKind::Msi, PackageKind::PortableZip] {
-                        ui.selectable_value(&mut choice, Some(kind), crate::i18n::t(kind.label()));
-                    }
-                });
+            row(ui, tl!("Install new apps as"), 210.0, &mut |ui, label| {
+                let shown = choice.map_or_else(|| crate::i18n::t(PackageKind::Msi.label()), |kind| crate::i18n::t(kind.label()));
+                egui::ComboBox::from_id_salt("windows-kind")
+                    .selected_text(shown)
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        for kind in [PackageKind::Msi, PackageKind::PortableZip] {
+                            ui.selectable_value(&mut choice, Some(kind), crate::i18n::t(kind.label()));
+                        }
+                    })
+                    .response
+                    .labelled_by(label);
             });
             self.settings.preferred_kinds = choice.into_iter().collect();
             note(ui, tl!("Updates always use the format an app was installed with."));
@@ -229,25 +256,30 @@ impl LauncherUi {
                 None
             };
             let mut choice = self.settings.preferred_kinds.first().copied().or(default_kind);
-            row(ui, tl!("Install new apps as"), 210.0, &mut |ui| {
+            row(ui, tl!("Install new apps as"), 210.0, &mut |ui, label| {
                 let default_label = match default_kind {
                     Some(k) => crate::i18n::t(k.label()),
                     None => tl!("System package (recommended)"),
                 };
-                let label = choice.map_or(default_label, |k| crate::i18n::t(k.label()));
-                egui::ComboBox::from_id_salt("kind").selected_text(label).width(210.0).show_ui(ui, |ui| {
-                    if !is_flatpak && !is_appimage {
-                        ui.selectable_value(&mut choice, None, tl!("System package (recommended)"));
-                    }
-                    for k in [PackageKind::Deb, PackageKind::Rpm, PackageKind::ArchPkg, PackageKind::Flatpak, PackageKind::AppImage] {
-                        ui.selectable_value(&mut choice, Some(k), crate::i18n::t(k.label()));
-                    }
-                    // The tarball is unpacked and run inside the launcher's own sandbox, so it
-                    // is only ever on offer there (as the fallback when the host has no Flatpak).
-                    if is_flatpak {
-                        ui.selectable_value(&mut choice, Some(PackageKind::TarGz), crate::i18n::t(PackageKind::TarGz.label()));
-                    }
-                });
+                let shown = choice.map_or(default_label, |k| crate::i18n::t(k.label()));
+                egui::ComboBox::from_id_salt("kind")
+                    .selected_text(shown)
+                    .width(210.0)
+                    .show_ui(ui, |ui| {
+                        if !is_flatpak && !is_appimage {
+                            ui.selectable_value(&mut choice, None, tl!("System package (recommended)"));
+                        }
+                        for k in [PackageKind::Deb, PackageKind::Rpm, PackageKind::ArchPkg, PackageKind::Flatpak, PackageKind::AppImage] {
+                            ui.selectable_value(&mut choice, Some(k), crate::i18n::t(k.label()));
+                        }
+                        // The tarball is unpacked and run inside the launcher's own sandbox, so it
+                        // is only ever on offer there (as the fallback when the host has no Flatpak).
+                        if is_flatpak {
+                            ui.selectable_value(&mut choice, Some(PackageKind::TarGz), crate::i18n::t(PackageKind::TarGz.label()));
+                        }
+                    })
+                    .response
+                    .labelled_by(label);
             });
             self.settings.preferred_kinds = choice.into_iter().collect();
             note(ui, tl!("Updates always use the format an app was installed with."));
@@ -272,8 +304,7 @@ impl LauncherUi {
                 && ui.checkbox(&mut on, tl!("Start ArtCraft Launcher when I log in")).changed()
                 && let Err(e) = host.set_login_item(on)
             {
-                let ctx = ui.ctx().clone();
-                self.toast(&ctx, fmt(tl!("Couldn't change the login item: {e}"), &[("e", &e)]), true);
+                self.toast_from_ui(fmt(tl!("Couldn't change the login item: {e}"), &[("e", &e)]), true);
             }
         });
     }

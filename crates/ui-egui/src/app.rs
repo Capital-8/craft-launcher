@@ -75,6 +75,31 @@ pub(crate) struct Toast {
     pub until: f64,
 }
 
+/// One user action collected while a UI pass draws, sent once when the pass finishes.
+///
+/// egui 0.37 may run `App::ui` (and therefore `LauncherUi::ui`) several times for one visible
+/// frame after `request_discard`. Keeping the side effect out of the widget handler and comparing
+/// it with what this frame already sent makes the same click idempotent across those passes, while
+/// a new click in the next frame is still delivered.
+///
+/// The payload is not a widget identity: two different controls in one pass may legitimately ask
+/// for the same command (for example the update button on a card and the launcher-update banner).
+/// The queue is drained in draw order and equal actions are counted, so a repeated pass can only
+/// repeat the actions it already produced, never collapse two distinct intents into one.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum UiAction {
+    Command(Command),
+    /// [`Command::Launch`] plus one launch-count increment.
+    Launch(String),
+    /// Re-run the manual update check, clearing the auto-update back-off.
+    CheckNow,
+    /// A message a UI interaction asked to show.
+    Toast {
+        text: String,
+        error: bool,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Dialog {
     Notes(String),
@@ -157,6 +182,15 @@ pub struct LauncherUi {
     pub(crate) auto_update_attempted: std::collections::BTreeSet<(String, String)>,
     /// The URL or deep link to open when Discord is clicked.
     pub(crate) discord_url: &'static str,
+    /// UI actions drawn in this pass, not sent yet.
+    pending: Vec<UiAction>,
+    /// The `egui::Context::cumulative_frame_nr` those actions belong to.
+    frame: Option<u64>,
+    /// UI actions this visible frame has already sent, so a discarded pass cannot repeat them.
+    flushed: Vec<UiAction>,
+    /// Toasts created from logic (which may run with an old input time) or the UI. Their expiry is
+    /// fixed when the next `ui` pass actually shows them.
+    pending_toasts: Vec<(String, bool)>,
 }
 
 /// The language to draw in: the preference, or English where it needs a CJK font the system
@@ -218,6 +252,10 @@ impl LauncherUi {
             was_focused: true,
             auto_update_attempted: std::collections::BTreeSet::new(),
             discord_url: artcraft_launcher_core::catalog::DISCORD_URL,
+            pending: Vec::new(),
+            frame: None,
+            flushed: Vec::new(),
+            pending_toasts: Vec::new(),
         }
     }
 
@@ -232,6 +270,10 @@ impl LauncherUi {
         self.applied_motion = None;
         self.motion_recheck = 0.0;
         self.toasts.clear();
+        // Actions belong to the old context's frame; messages waiting to be shown do not.
+        self.pending.clear();
+        self.frame = None;
+        self.flushed.clear();
     }
 
     /// Input on its way to egui (the shell's `raw_input_hook`): with fewer animations asked for,
@@ -266,12 +308,83 @@ impl LauncherUi {
         self.backend.send(command);
     }
 
-    pub(crate) fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>, error: bool) {
-        let now = ctx.input(|i| i.time);
-        self.toasts.push(Toast { text: text.into(), error, until: now + if error { 8.0 } else { 4.5 } });
-        if self.toasts.len() > 4 {
-            self.toasts.remove(0);
+    /// The toolbar's check button. The side effects run once, when the pass flushes.
+    pub(crate) fn check_now_from_ui(&mut self) {
+        self.act(UiAction::CheckNow);
+    }
+
+    /// Queues one user action. Distinct controls may queue equal payloads in the same pass; the
+    /// per-frame duplicate check happens in [`Self::flush_actions`] when the draw order is known.
+    fn act(&mut self, action: UiAction) {
+        self.pending.push(action);
+    }
+
+    pub(crate) fn act_command(&mut self, command: Command) {
+        self.act(UiAction::Command(command));
+    }
+
+    /// Starts a visible frame: only a completed `run_ui` advances the frame number, so all discarded
+    /// passes of one frame share a `flushed` list.
+    fn begin_ui_frame(&mut self, ctx: &egui::Context) {
+        let frame = ctx.cumulative_frame_nr();
+        if self.frame != Some(frame) {
+            self.frame = Some(frame);
+            self.flushed.clear();
         }
+    }
+
+    /// Sends the actions collected by this pass, exactly once per visible frame.
+    ///
+    /// Actions are compared by their `rank` among equal actions in this pass: the first Install in
+    /// a pass is the first Install that frame, the second is the second. A re-run pass produces the
+    /// same ranks in the same draw order, so anything at or below the number already sent is a
+    /// repeat; a genuinely new second intent of the same kind still gets its own rank and is sent.
+    fn flush_actions(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
+        for (index, action) in pending.iter().enumerate() {
+            let rank = pending[..index].iter().filter(|earlier| *earlier == action).count();
+            let already_sent = self.flushed.iter().filter(|sent| *sent == action).count();
+            if rank < already_sent {
+                // This action belongs to an earlier pass of the same visible frame.
+                continue;
+            }
+            match action {
+                UiAction::Command(command) => self.backend.send(command.clone()),
+                UiAction::Launch(id) => {
+                    let opened = self.settings.launches.entry(id.clone()).or_insert(0);
+                    *opened = opened.saturating_add(1);
+                    self.backend.send(Command::Launch { app: id.clone() });
+                }
+                UiAction::CheckNow => {
+                    self.auto_update_attempted.clear();
+                    self.backend.send(Command::CheckForUpdates { force: true });
+                    self.backend.send(Command::Detect);
+                    self.last_detect = self.backend.now();
+                }
+                UiAction::Toast { text, error } => self.queue_toast(text.clone(), *error),
+            }
+            self.flushed.push(action.clone());
+        }
+    }
+
+    /// Queues a message for the next pass that can actually draw. Its age is deliberately not
+    /// part of the queue: a job that finished while the window was hidden is still news when the
+    /// window first opens, so the countdown starts on display (see [`Self::draw_toasts`]).
+    fn queue_toast(&mut self, text: String, error: bool) {
+        self.pending_toasts.push((text, error));
+        if self.pending_toasts.len() > 4 {
+            self.pending_toasts.remove(0);
+        }
+    }
+
+    pub(crate) fn toast(&mut self, text: impl Into<String>, error: bool) {
+        self.queue_toast(text.into(), error);
+    }
+
+    /// A toast caused by a UI interaction: guarded by the same per-frame action boundary as
+    /// installs and launches, so a discarded pass cannot show it twice.
+    pub(crate) fn toast_from_ui(&mut self, text: impl Into<String>, error: bool) {
+        self.act(UiAction::Toast { text: text.into(), error });
     }
 
     pub(crate) fn entry(&self, id: &str) -> Option<&AppEntry> {
@@ -304,7 +417,7 @@ impl LauncherUi {
 
     pub(crate) fn install_app(&mut self, id: &str) {
         if !self.custom_install_folders() || self.entry(id).is_some_and(|e| e.installed.is_some()) {
-            self.send(Command::Install { app: id.to_string() });
+            self.act_command(Command::Install { app: id.to_string() });
             return;
         }
         self.dialog =
@@ -339,7 +452,7 @@ impl LauncherUi {
         }
         let mut changed = false;
         for event in self.backend.poll() {
-            changed |= self.handle(ctx, event);
+            changed |= self.handle(event);
         }
         if changed {
             self.announce_updates(host);
@@ -357,7 +470,7 @@ impl LauncherUi {
     }
 
     /// Returns whether app state changed.
-    fn handle(&mut self, ctx: &egui::Context, event: Event) -> bool {
+    fn handle(&mut self, event: Event) -> bool {
         match event {
             Event::Latest { app, latest, from } => {
                 self.on_latest(app, latest, from);
@@ -404,7 +517,7 @@ impl LauncherUi {
                 false
             }
             Event::JobFinished { app, result } => {
-                self.on_job_finished(ctx, app, result);
+                self.on_job_finished(app, result);
                 true
             }
             Event::LauncherUpdate(r) => self.on_launcher_update(r),
@@ -445,7 +558,7 @@ impl LauncherUi {
     }
 
     /// Summarizes a job's end as a toast; cancellations have their own messages.
-    fn on_job_finished(&mut self, ctx: &egui::Context, app: String, result: Result<String, String>) {
+    fn on_job_finished(&mut self, app: String, result: Result<String, String>) {
         let launcher = app == artcraft_launcher_core::catalog::LAUNCHER_ID;
         // What the job was doing when it ended says what a cancellation called off.
         let last = if launcher { self.launcher_job.take() } else { self.entry(&app).and_then(|e| e.job) };
@@ -454,23 +567,23 @@ impl LauncherUi {
         }
         let kept = self.entry(&app).is_some_and(|e| e.ready);
         match result {
-            Ok(msg) => self.toast(ctx, msg, false),
+            Ok(msg) => self.toast(msg, false),
             // The paused card says it all.
             Err(e) if e == PAUSED => {}
-            Err(e) if e == CANCELLED && launcher => self.toast(ctx, tl!("Update cancelled"), false),
+            Err(e) if e == CANCELLED && launcher => self.toast(tl!("Update cancelled"), false),
             // An install's own cancellations end as INSTALL_CANCELLED, so past the
             // download this is a removal called off while it waited for the installer.
             Err(e) if e == CANCELLED && matches!(last, Some(JobPhase::Waiting | JobPhase::Removing)) => {
-                self.toast(ctx, tl!("Uninstall cancelled"), false);
+                self.toast(tl!("Uninstall cancelled"), false);
             }
-            Err(e) if e == CANCELLED => self.toast(ctx, tl!("Download cancelled"), false),
+            Err(e) if e == CANCELLED => self.toast(tl!("Download cancelled"), false),
             Err(e) if e == INSTALL_CANCELLED && kept => {
-                self.toast(ctx, tl!("Install cancelled. The download is kept for the next try."), false);
+                self.toast(tl!("Install cancelled. The download is kept for the next try."), false);
             }
-            Err(e) if e == INSTALL_CANCELLED => self.toast(ctx, tl!("Install cancelled"), false),
+            Err(e) if e == INSTALL_CANCELLED => self.toast(tl!("Install cancelled"), false),
             // The Replace dialog says it all.
             Err(_) if matches!(&self.dialog, Some(Dialog::Replace { app: a, .. }) if *a == app) => {}
-            Err(e) => self.toast(ctx, e, true),
+            Err(e) => self.toast(e, true),
         }
     }
 
@@ -518,6 +631,20 @@ impl LauncherUi {
         for (id, _, version) in fresh {
             self.settings.notified.insert(id.to_string(), version);
         }
+    }
+
+    /// The user closed the window and it went away in the tray. The first time, a notification
+    /// says so, with where to find it and how to quit: a window that vanishes with nothing to show
+    /// for it looks hung (#45, #215).
+    pub fn hidden_to_tray(&mut self, host: &mut dyn Host) {
+        if self.settings.tray_hint_shown {
+            return;
+        }
+        self.settings.tray_hint_shown = true;
+        host.notify(
+            tl!("ArtCraft Launcher is still running"),
+            tl!("It's in the tray: open it or quit it from the tray icon, or turn this off in the settings."),
+        );
     }
 
     /// When auto-updates are enabled, automatically downloads and installs pending updates.
@@ -579,6 +706,7 @@ impl LauncherUi {
     /// Draws the launcher.
     pub fn ui(&mut self, ui: &mut egui::Ui, host: &mut dyn Host) {
         let ctx = ui.ctx().clone();
+        self.begin_ui_frame(&ctx);
         if host.title_bar() == TitleBar::MacOs && ctx.input_mut(|i| i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::M)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
@@ -594,6 +722,9 @@ impl LauncherUi {
         if !self.fonts_ready {
             self.fonts_ready = true;
             ctx.request_repaint();
+            // A click cannot have produced an action on this pass (nothing was drawn), but a queued
+            // action from an earlier pass must never be lost to the early return.
+            self.flush_actions();
             return;
         }
         self.zoom_input(&ctx);
@@ -655,6 +786,7 @@ impl LauncherUi {
             });
         self.details_drawer(&ctx);
         self.dialogs(&ctx, host);
+        self.flush_actions();
         self.draw_toasts(&ctx);
         if host.title_bar() == TitleBar::Custom {
             crate::widgets::window_edges(&ctx);
@@ -726,9 +858,7 @@ impl LauncherUi {
 
     /// Opens an app, and counts it for "Frequently used".
     pub(crate) fn launch_app(&mut self, id: &str) {
-        let opened = self.settings.launches.entry(id.to_string()).or_insert(0);
-        *opened = opened.saturating_add(1);
-        self.send(Command::Launch { app: id.to_string() });
+        self.act(UiAction::Launch(id.to_string()));
     }
 
     /// Whether the app on screen under `id` is installed on this computer.
@@ -778,6 +908,14 @@ impl LauncherUi {
 
     fn draw_toasts(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
+        // Logic may have queued these while no UI ran, with an old input time. They start their
+        // countdown only now, on the first pass that can actually show them.
+        for (text, error) in std::mem::take(&mut self.pending_toasts) {
+            self.toasts.push(Toast { text, error, until: now + if error { 8.0 } else { 4.5 } });
+            if self.toasts.len() > 4 {
+                self.toasts.remove(0);
+            }
+        }
         self.toasts.retain(|t| t.until > now);
         if self.toasts.is_empty() {
             return;
@@ -785,31 +923,204 @@ impl LauncherUi {
         ctx.request_repaint_after(Duration::from_millis(250));
         let t = Tokens::get(ctx);
         let anchor = egui::vec2(-20.0, -(crate::views::FOOTER_H + 12.0));
-        egui::Area::new(egui::Id::new("toasts")).anchor(egui::Align2::RIGHT_BOTTOM, anchor).order(egui::Order::Foreground).show(ctx, |ui| {
-            ui.set_max_width(380.0);
-            let mut dismiss = None;
-            for (i, toast) in self.toasts.iter().enumerate() {
-                let accent = if toast.error { t.bad } else { t.good };
-                let r = egui::Frame::new()
-                    .fill(t.bg)
-                    .stroke(egui::Stroke::new(1.0, t.line_strong))
-                    .shadow(theme::shadow(&t))
-                    .inner_margin(egui::Margin::symmetric(14, 10))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
-                            ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, accent);
-                            ui.add(egui::Label::new(egui::RichText::new(crate::i18n::msg(&toast.text)).color(t.ink)).wrap());
+        egui::Area::new(egui::Id::unique("toasts"))
+            .role(egui::Role::Alert)
+            .anchor(egui::Align2::RIGHT_BOTTOM, anchor)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                let mut dismiss = None;
+                for (i, toast) in self.toasts.iter().enumerate() {
+                    let accent = if toast.error { t.bad } else { t.good };
+                    let r = egui::Frame::new()
+                        .fill(t.bg)
+                        .stroke(egui::Stroke::new(1.0, t.line_strong))
+                        .shadow(theme::shadow(&t))
+                        .inner_margin(egui::Margin::symmetric(14, 10))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(6.0, 6.0), egui::Sense::hover());
+                                ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, accent);
+                                ui.add(egui::Label::new(egui::RichText::new(crate::i18n::msg(&toast.text)).color(t.ink)).wrap());
+                            });
                         });
-                    });
-                if r.response.interact(egui::Sense::click()).clicked() {
-                    dismiss = Some(i);
+                    if r.response.interact(egui::Sense::click()).clicked() {
+                        dismiss = Some(i);
+                    }
+                    ui.add_space(6.0);
                 }
-                ui.add_space(6.0);
-            }
-            if let Some(i) = dismiss {
-                self.toasts.remove(i);
-            }
-        });
+                if let Some(i) = dismiss {
+                    self.toasts.remove(i);
+                }
+            });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use super::*;
+
+    struct NoHost;
+    impl Host for NoHost {}
+
+    /// A backend that records commands and has no jobs, pictures or events.
+    struct Recorder {
+        sent: Rc<RefCell<Vec<Command>>>,
+    }
+
+    impl Backend for Recorder {
+        fn send(&mut self, command: Command) {
+            self.sent.borrow_mut().push(command);
+        }
+        fn poll(&mut self) -> Vec<Event> {
+            Vec::new()
+        }
+        fn capabilities(&self) -> Capabilities {
+            Capabilities { manage_apps: false, reveal_label: "Show", self_update: false }
+        }
+        fn platform(&self) -> Option<Platform> {
+            None
+        }
+        fn now(&self) -> i64 {
+            0
+        }
+    }
+
+    /// A UI and the context its fonts, theme and image loaders were installed into.
+    fn launcher() -> (LauncherUi, Rc<RefCell<Vec<Command>>>, egui::Context) {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let backend = Recorder { sent: sent.clone() };
+        // A fixed language keeps `effective_lang` away from the machine's locale.
+        let settings = Settings { language: "en".into(), notify: false, ..Settings::default() };
+        let ctx = egui::Context::default();
+        (LauncherUi::new(&ctx, Box::new(backend), settings), sent, ctx)
+    }
+
+    /// One `run_ui` pass at a chosen input time, exactly like the native shell's callback order.
+    fn frame(launcher: &mut LauncherUi, ctx: &egui::Context, time: f64) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1180.0, 900.0))),
+            time: Some(time),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| launcher.ui(ui, &mut NoHost));
+        // This logic-only harness has no renderer to receive texture uploads.
+        output.textures_delta.clear();
+    }
+
+    fn installs(sent: &RefCell<Vec<Command>>) -> usize {
+        sent.borrow().iter().filter(|command| matches!(command, Command::Install { .. })).count()
+    }
+
+    #[test]
+    fn two_distinct_intents_with_the_same_command_are_both_delivered() {
+        let (mut launcher, sent, _ctx) = launcher();
+        launcher.frame = Some(1);
+        // Two different controls in one pass can ask for the same command (the card's Update and
+        // the banner's Update, say). Their payload is equal, but they are not one gesture.
+        launcher.act_command(Command::Install { app: "photocraft".into() });
+        launcher.act_command(Command::Install { app: "photocraft".into() });
+        launcher.flush_actions();
+        assert_eq!(installs(&sent), 2, "both intents must reach the backend: {:?}", sent.borrow());
+    }
+
+    #[test]
+    fn distinct_actions_in_a_later_pass_are_both_delivered() {
+        let (mut launcher, sent, _ctx) = launcher();
+        launcher.frame = Some(1);
+        launcher.act_command(Command::Install { app: "photocraft".into() });
+        launcher.flush_actions();
+        // A second pass that finds two genuinely different actions must not lose either.
+        launcher.act_command(Command::Install { app: "filmcraft".into() });
+        launcher.act_command(Command::Cancel { app: "lightcraft".into() });
+        launcher.flush_actions();
+        assert_eq!(
+            *sent.borrow(),
+            [
+                Command::Install { app: "photocraft".into() },
+                Command::Install { app: "filmcraft".into() },
+                Command::Cancel { app: "lightcraft".into() },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_repeated_pass_sends_nothing_but_a_new_frame_sends_again() {
+        let (mut launcher, sent, _ctx) = launcher();
+        launcher.frame = Some(1);
+        launcher.act_command(Command::Install { app: "photocraft".into() });
+        launcher.flush_actions();
+        // The discarded second pass redraws the same clicked widget.
+        launcher.act_command(Command::Install { app: "photocraft".into() });
+        launcher.flush_actions();
+        assert_eq!(installs(&sent), 1, "a second pass over the same gesture must not repeat it: {:?}", sent.borrow());
+        // The next visible frame is a new gesture.
+        launcher.frame = Some(2);
+        launcher.flushed.clear();
+        launcher.act_command(Command::Install { app: "photocraft".into() });
+        launcher.flush_actions();
+        assert_eq!(installs(&sent), 2, "the next frame must accept the action again: {:?}", sent.borrow());
+    }
+
+    #[test]
+    fn a_launch_count_is_incremented_once_per_visible_frame() {
+        let (mut launcher, sent, _ctx) = launcher();
+        launcher.frame = Some(1);
+        launcher.act(UiAction::Launch("photocraft".into()));
+        launcher.flush_actions();
+        launcher.act(UiAction::Launch("photocraft".into()));
+        launcher.flush_actions();
+        assert_eq!(launcher.settings.launches.get("photocraft"), Some(&1));
+        let launches = sent.borrow().iter().filter(|command| matches!(command, Command::Launch { .. })).count();
+        assert_eq!(launches, 1, "one gesture, one launch command: {:?}", sent.borrow());
+    }
+
+    #[test]
+    fn a_pending_action_survives_the_fonts_ready_early_return_exactly_once() {
+        let (mut launcher, sent, ctx) = launcher();
+        // `new` installed the fonts but the first pass cannot draw with them yet.
+        assert!(!launcher.fonts_ready);
+        launcher.act_command(Command::Install { app: "photocraft".into() });
+        frame(&mut launcher, &ctx, 0.0);
+        assert_eq!(installs(&sent), 1, "the early return must flush what was already pending: {:?}", sent.borrow());
+        frame(&mut launcher, &ctx, 0.25);
+        assert_eq!(installs(&sent), 1, "the following pass must not repeat it: {:?}", sent.borrow());
+    }
+
+    #[test]
+    fn a_ui_toast_is_shown_once_across_passes() {
+        let (mut launcher, _sent, _ctx) = launcher();
+        launcher.frame = Some(1);
+        launcher.toast_from_ui("Finished", false);
+        launcher.flush_actions();
+        launcher.toast_from_ui("Finished", false);
+        launcher.flush_actions();
+        assert_eq!(launcher.pending_toasts.len(), 1, "a repeated pass must not queue the toast twice");
+    }
+
+    #[test]
+    fn a_hidden_result_gets_its_expiry_from_the_pass_that_shows_it() {
+        let (mut launcher, _sent, ctx) = launcher();
+        // The fonts gate pass draws nothing and shows no toast.
+        frame(&mut launcher, &ctx, 0.0);
+        // A job finished while the window was hidden, when `logic`'s input time was old (0).
+        launcher.toast("PhotoCraft updated", false);
+        frame(&mut launcher, &ctx, 1000.0);
+        let toast = launcher.toasts.first().expect("the first drawing pass shows the pending toast");
+        assert_eq!(toast.until, 1004.5, "expiry must be relative to the drawing pass, not the old logic time");
+        // Past the stale (0 + 4.5) deadline this would already be gone; it is still fresh at 1000.
+        frame(&mut launcher, &ctx, 1004.6);
+        assert!(launcher.toasts.is_empty(), "the toast goes at its real expiry");
+    }
+
+    #[test]
+    fn attaching_a_window_keeps_messages_still_waiting_to_be_shown() {
+        let (mut launcher, _sent, ctx) = launcher();
+        launcher.toast("PhotoCraft updated", false);
+        launcher.attach(&ctx);
+        assert_eq!(launcher.pending_toasts.len(), 1, "a message from logic is not tied to the old window");
     }
 }
