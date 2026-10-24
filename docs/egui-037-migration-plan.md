@@ -1,25 +1,26 @@
 # egui 0.37 migration plan for ArtCraft Launcher
 
-Status (2026-10-24): local implementation at HEAD
-`674b893f0e5dcaceb742ae22728b8bde8bd73911`, with the reviewed migration patch.
-Managed `replay-tests-20` passed 139 unique tests (141 executions including the focused rerun)
-and strict workspace clippy. `mutation-native-build-21` proved both real Update/Open tests fail
-when the dispatch boundary is disabled and pass after source restoration; the native build passed.
-`native-gui-22` / `native-launcher-session-v4` exercised Settings, resize, Light theme,
-language handling, restart persistence and normal quit on private Wayland/software Vulkan.
-Tested tracked patch SHA-256: `b81efb89f749135763385f74eac49ab0daacd73b2191b5426e8cfb939b05f741`.
-Tested executable SHA-256: `8e602df60e658b3e95ff825067462494b06656d5be5597b6757ff93174301015`.
-Fresh review v8 found no new runtime defect in that scope; this status corrects its documentation finding.
-All jobs used `local-integration-config.toml`: final immutable fork revisions and a self-contained
-locked dependency graph remain a publication gate. Native CJK rendering, other platforms,
-real screen readers and before/after performance remain unqualified. No publication is authorized.
+Status (2026-10-24): the local migration incorporates frozen main
+`c0fa1c69f452bab61ec3fd806646ef4daff9912a` and pins egui
+`6d518fc799681571963842f95b55a6b68431b15a` and winit
+`a517b3846ee8457d84ee4975110bfda6797c44dc`. The regenerated lockfile passed the
+source audit and all four stages of `egui037-launcher-final-ci-20261024-2027`:
+429 tests passed, none failed and five were ignored. Packaging shellcheck/actionlint
+also passed. The current native Linux workflow passed Settings, resize, theme,
+restart persistence and normal quit on private Wayland/software Vulkan.
+The earlier action-dispatch mutation tests remain evidence for the retained implementation.
+The local merge preserves both migration history and the reviewed upstream changes;
+final code and dependency bytes match the passing CI. Subsequent status edits are prose only.
+The external dependency override is no longer required for the canonical pins and lock.
+Native CJK rendering, other platforms, real screen readers and before/after performance
+remain unqualified. Human review and approval are required before app publication.
 
 Sections 1–11 below began as research and planning on baseline
 `9419d8977bc70f80373da8558356e4ba7387c7b2`. They are retained as historical research and migration
 guidance, not as a claim that the current tree is unchanged or that a build/test/GUI run happened
 at that baseline. The status above and the dated implementation amendments at the end supersede
-their stale status and decision statements. In particular, F1 is still a known external
-publication gate, and the original plan's emoji-font decision was revised on 2026-10-24.
+their stale status and decision statements. F1's dependency-publication gate is now closed by the canonical pins and generated lock;
+the original plan's emoji-font decision was revised on 2026-10-24.
 
 This plan covers only `storytold/craft-launcher` (the ArtCraft Launcher repository). It records the
 app-specific migration, not a generic egui compatibility layer. `craft-libs`, the individual Craft
