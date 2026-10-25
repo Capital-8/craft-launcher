@@ -64,7 +64,7 @@ impl LauncherUi {
                     if let Some(link) = &alert.link
                         && widgets::button(ui, tl!("Open link"), Kind::Secondary, 110.0).on_hover_text(link.as_str()).clicked()
                     {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(link.clone()));
+                        widgets::open_external_link(ui.ctx(), link);
                     }
                 });
             });
@@ -163,7 +163,7 @@ impl LauncherUi {
                         .and_then(|p| crate::views::launcher_download(r, p, crate::settings::is_flatpak_sandbox()))
                         .unwrap_or_else(|| r.html_url.clone());
                     if widgets::button(ui, tl!("Download"), Kind::Primary, 0.0).clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        widgets::open_external_link(ui.ctx(), &url);
                         close = true;
                     }
                 }

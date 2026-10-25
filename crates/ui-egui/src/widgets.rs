@@ -271,6 +271,27 @@ pub fn window_edges(ctx: &egui::Context) {
     }
 }
 
+/// Whether `url` may be handed to the system/browser opener.
+///
+/// Release assets, release pages and feed links all come from the network, so every external
+/// opener goes through the same check as [`release::safe_web_link`](artcraft_launcher_core::release::safe_web_link).
+/// The one intentional non-https target is the exact Discord app deep link, which the desktop
+/// shell intercepts and opens through the system opener with a web fallback; arbitrary custom
+/// schemes stay refused.
+pub(crate) fn external_link_allowed(url: &str) -> bool {
+    artcraft_launcher_core::release::safe_web_link(url) || url == artcraft_launcher_core::catalog::DISCORD_APP_URL
+}
+
+/// Opens a UI link only after [`external_link_allowed`]; anything else is logged and dropped.
+pub(crate) fn open_external_link(ctx: &egui::Context, url: &str) {
+    if external_link_allowed(url) {
+        ctx.open_url(egui::OpenUrl::new_tab(url));
+    } else {
+        // Debug-format so control characters in a hostile URL cannot forge a log line.
+        log::warn!("refusing to open unsafe URL: {url:?}");
+    }
+}
+
 /// A mono link with an ↗: muted, ink on hover. Opens `url` in the browser.
 pub fn hud_link(ui: &mut Ui, text: &str, url: &str) -> Response {
     let t = Tokens::get(ui.ctx());
@@ -280,7 +301,7 @@ pub fn hud_link(ui: &mut Ui, text: &str, url: &str) -> Response {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, text));
     let resp = resp.on_hover_text(url).on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.clicked() {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        open_external_link(ui.ctx(), url);
     }
     resp
 }
@@ -618,7 +639,7 @@ fn icon_link(ui: &mut Ui, size: f32, link: &IconLink<'_>) {
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, &link.label));
     let resp = resp.on_hover_text(&link.tip).on_hover_cursor(egui::CursorIcon::PointingHand);
     if resp.clicked() {
-        ui.ctx().open_url(egui::OpenUrl::new_tab(link.url));
+        open_external_link(ui.ctx(), link.url);
     }
 }
 
@@ -668,6 +689,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn opened_urls(ctx: &egui::Context) -> Vec<String> {
+        ctx.output(|out| {
+            out.commands
+                .iter()
+                .filter_map(|command| match command {
+                    egui::OutputCommand::OpenUrl(open) => Some(open.url.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    /// Every external opener goes through `open_external_link`; a release asset URL carrying an
+    /// opener metacharacter must never reach egui's open command, while a plain https release
+    /// URL and the exact Discord app deep link still do.
+    #[test]
+    fn external_openers_refuse_hostile_urls() {
+        let ctx = egui::Context::default();
+        let release_asset = "https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft-0.5.0-macos-universal.dmg";
+        open_external_link(&ctx, release_asset);
+        assert_eq!(opened_urls(&ctx), vec![release_asset.to_string()]);
+
+        ctx.output_mut(|out| out.commands.clear());
+        for hostile in [
+            "https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft.dmg|calc.exe",
+            "https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft.dmg&whoami",
+            "https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft.dmg`id`",
+            "https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft.dmg\nnext",
+            "https://user@evil.example/photocraft.dmg",
+            "https:///path",
+            "javascript:alert(1)",
+            "file:///C:/Windows/System32/calc.exe",
+            "ms-msdt:/id",
+            "discord://-/invite/not-artcraft",
+        ] {
+            open_external_link(&ctx, hostile);
+        }
+        assert!(opened_urls(&ctx).is_empty(), "hostile URLs reached the opener: {:?}", opened_urls(&ctx));
+
+        open_external_link(&ctx, artcraft_launcher_core::catalog::DISCORD_APP_URL);
+        assert_eq!(opened_urls(&ctx), vec![artcraft_launcher_core::catalog::DISCORD_APP_URL.to_string()]);
     }
 
     /// Each glyph must be distinct geometry, not the same fallback shape for all four.

@@ -588,7 +588,7 @@ fn link_buttons(ui: &mut Ui, app: &CraftApp) {
         ui.spacing_mut().item_spacing.x = 8.0;
         for (label, url) in links {
             if widgets::button(ui, &format!("{label} ↗"), Kind::Secondary, 0.0).on_hover_text(url.as_str()).clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                widgets::open_external_link(ui.ctx(), &url);
             }
         }
     });

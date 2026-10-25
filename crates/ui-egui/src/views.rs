@@ -178,7 +178,7 @@ impl LauncherUi {
                 let url =
                     self.platform.and_then(|p| launcher_download(r, p, crate::settings::is_flatpak_sandbox())).unwrap_or_else(|| r.html_url.clone());
                 if widgets::button(ui, tl!("Download"), Kind::Primary, 0.0).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    widgets::open_external_link(ui.ctx(), &url);
                 }
             }
             ui.add_space(8.0);
@@ -946,7 +946,7 @@ impl LauncherUi {
                     None => tl!("Download").into(),
                 };
                 if widgets::button(ui, &label, Kind::Primary, main_w).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    widgets::open_external_link(ui.ctx(), &url);
                 }
             }
             Primary::Unavailable(label) => {
@@ -983,7 +983,7 @@ impl LauncherUi {
                 ui.separator();
                 let link = |ui: &mut Ui, label: &str, url: String| {
                     if ui.button(label).clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                        widgets::open_external_link(ui.ctx(), &url);
                         ui.close();
                     }
                 };
@@ -1035,7 +1035,7 @@ impl LauncherUi {
             ui.separator();
             for (label, url) in options {
                 if ui.button(label).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                    widgets::open_external_link(ui.ctx(), &url);
                     ui.close();
                 }
             }

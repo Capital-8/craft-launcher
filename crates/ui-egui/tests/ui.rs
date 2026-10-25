@@ -1265,6 +1265,38 @@ fn links_open_the_right_pages() {
     assert!(url.starts_with("https://github.com/storytold/") && url.ends_with("/releases"), "{url}");
 }
 
+/// An asset URL can come straight from GitHub's release JSON; it must not reach the opener when
+/// it carries an opener metacharacter, whether it is shown on a card or in the launcher dialog.
+#[test]
+fn hostile_release_asset_urls_never_reach_the_opener() {
+    const HOSTILE: &str = "https://github.com/storytold/photocraft/releases/download/v0.5.0/photocraft-0.5.0-macos-universal.dmg|calc.exe";
+
+    let mut ev = events();
+    for event in &mut ev {
+        if let Event::Latest { app, latest: LatestRelease::Found(release), .. } = event
+            && app.as_str() == "photocraft"
+            && let Some(asset) = release.assets.first_mut()
+        {
+            asset.url = HOSTILE.to_string();
+        }
+    }
+    let (mut h, _) = harness_with(ev, ViewMode::Grid, egui::Theme::Dark, false, 1.0);
+    h.run_steps(8);
+    assert!(h.query_all_by_label("Download for macOS").count() >= 8, "the cards must offer their asset downloads");
+    let opened = all_opened(&mut h, "Download for macOS");
+    assert!(!opened.iter().any(|url| url.as_str() == HOSTILE), "a hostile card asset URL reached the opener: {opened:?}");
+
+    let mut ev = events();
+    let mut launcher_release = release("artcraft-launcher", "0.2.0", NOW);
+    launcher_release.assets[0].url = HOSTILE.to_string();
+    ev.push(Event::LauncherUpdate(launcher_release));
+    let (mut h, _) = harness_with(ev, ViewMode::Grid, egui::Theme::Dark, false, 1.0);
+    h.run_steps(6);
+    assert_eq!(h.query_all_by_label("Download").count(), 1, "the launcher update dialog must be open");
+    let opened = all_opened(&mut h, "Download");
+    assert!(opened.is_empty(), "a hostile launcher-dialog asset URL reached the opener: {opened:?}");
+}
+
 #[test]
 fn discord_link_opens_app_when_discord_is_installed() {
     let (mut h, _) = harness_with_discord(Some(artcraft_launcher_core::catalog::DISCORD_APP_URL));

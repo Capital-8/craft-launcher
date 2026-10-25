@@ -1,5 +1,9 @@
 # egui 0.37 migration plan for ArtCraft Launcher
 
+Current review candidate (2026-10-25): reconciles main `f0cb3b0439d15cae02d806e5ddc0132fd487c89c`. Managed run `egui037-launcher-review-ci-20261025-0816` passed all four CI stages including WASM: 442 passing test executions, zero failures and five ignored across 22 summaries. Unicode credential redaction uses byte boundaries; regression run 0821 reproduced the previous panic and run 0823 passed on the restored fixed source. External-link buttons share the validated opener, and terminal text sanitizes C1 controls and Unicode line separators. Independent review covered the reconciliation and fixes. Old v0.7 single-instance interoperability remains unqualified; quit the existing tray process before upgrading. Current-source native/browser/package and paired performance acceptance remain open. Publication requires explicit approval; human review and human merge are required.
+
+The qualification records below describe earlier source snapshots.
+
 Status (2026-10-24): the local migration incorporates frozen main
 `c0fa1c69f452bab61ec3fd806646ef4daff9912a` and pins egui
 `6d518fc799681571963842f95b55a6b68431b15a` and winit
