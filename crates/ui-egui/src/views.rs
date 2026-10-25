@@ -252,12 +252,16 @@ impl LauncherUi {
         });
     }
 
+    /// The toolbar's check button. It queues a forced check through the UI action boundary and is
+    /// disabled while `self.checking`; the backend receives the check only when this pass flushes.
     fn refresh_button(&mut self, ui: &mut Ui) {
         if crate::bar::refresh_button(ui, tl!("Check for updates"), self.checking).clicked() {
             self.check_now_from_ui();
         }
     }
 
+    /// The grid's sort combo box. It writes the chosen key and direction directly (not through the
+    /// action queue) and carries an accessible "Sort" name.
     fn sort_picker(&mut self, ui: &mut Ui) {
         egui::ComboBox::from_id_salt("sort")
             .selected_text(RichText::new(grid_sort_label(grid_sort_now(&self.settings))).size(13.0))
@@ -425,6 +429,10 @@ impl LauncherUi {
         }
     }
 
+    /// Draws one app card into the caller-allocated `rect`. A card whose app has a details page gets
+    /// a click target over the whole rect before its own links and buttons, so those sit on top and
+    /// keep their clicks. An installed card is drawn in colour; a missing one greys out until the
+    /// pointer is over it.
     fn card(&mut self, ui: &mut Ui, id: &str, rect: Rect) {
         let Some(entry) = self.entry(id).cloned() else { return };
         let t = Tokens::get(ui.ctx());
@@ -955,6 +963,11 @@ impl LauncherUi {
         }
     }
 
+    /// The card's "…" menu. Backend commands are queued at the action boundary; dialog, settings and
+    /// external-link actions happen inline. "Download again" appears
+    /// only for a kept download in a ready available/update state and cancels before installing;
+    /// `links` adds the website/repository/releases rows, which the details drawer omits because it
+    /// shows them as buttons.
     fn menu(&mut self, ui: &mut Ui, entry: &AppEntry, status: &AppStatus, links: bool) {
         let id = entry.app.id.to_string();
         let manage = self.caps.manage_apps;

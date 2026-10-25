@@ -10,6 +10,10 @@ use crate::theme::{self, Tokens};
 use crate::widgets::{self, Kind};
 
 impl LauncherUi {
+    /// Draws the current modal and writes any edits made in it back to `self.dialog`. With no
+    /// dialog it shows the next unacknowledged feed alert. Each dialog kind gets its own modal id
+    /// so a smaller prompt cannot inherit a taller one's last size, and closing (button, Escape or
+    /// a click outside) discards the dialog.
     pub(crate) fn dialogs(&mut self, ctx: &egui::Context, host: &mut dyn Host) {
         let Some(mut dialog) = self.dialog.clone() else {
             self.alert_popup(ctx);
@@ -75,6 +79,8 @@ impl LauncherUi {
         }
     }
 
+    /// Draws the optional icon beside a heading and an optional subtitle. The icon is decorative so
+    /// assistive technology hears the title once, and an empty subtitle is omitted.
     fn title(ui: &mut egui::Ui, icon: Option<egui::ImageSource<'static>>, title: &str, subtitle: &str) {
         let t = Tokens::get(ui.ctx());
         ui.horizontal(|ui| {
@@ -133,6 +139,9 @@ impl LauncherUi {
         close
     }
 
+    /// Offers a new launcher version and returns whether the dialog should close. With self-update
+    /// it queues `UpdateLauncher` and closes; otherwise it opens the platform download (or the
+    /// release page) and closes. "Later" closes without doing either.
     fn launcher_update_dialog(&mut self, ui: &mut egui::Ui, r: &artcraft_launcher_core::Release) -> bool {
         let t = Tokens::get(ui.ctx());
         ui.set_width(480.0f32.min(ui.ctx().content_rect().width() - 80.0));
@@ -175,6 +184,9 @@ impl LauncherUi {
         close
     }
 
+    /// Confirms removing an installed app and returns `true` when the dialog should close, including
+    /// when the app entry has disappeared. It queues `Uninstall` only on confirmation and explains
+    /// the removal differently for each install source.
     fn uninstall_dialog(&mut self, ui: &mut egui::Ui, id: &str) -> bool {
         let Some(entry) = self.entry(id).cloned() else { return true };
         let t = Tokens::get(ui.ctx());
@@ -210,6 +222,9 @@ impl LauncherUi {
         close
     }
 
+    /// Warns that `path` already exists and asks whether to replace it, returning `true` when the
+    /// dialog should close, including when the app entry is gone. `Replace` is queued at the action
+    /// boundary, not sent inline.
     fn replace_dialog(&mut self, ui: &mut egui::Ui, id: &str, path: &str) -> bool {
         let Some(app) = self.entry(id).map(|e| e.app) else { return true };
         let t = Tokens::get(ui.ctx());
@@ -235,6 +250,10 @@ impl LauncherUi {
         close
     }
 
+    /// Lets the user choose this app's install folder and returns `true` when the dialog should
+    /// close, including when the app entry is gone. An empty field removes the per-app override, a
+    /// non-empty one persists it, and any changed configuration is sent before the install is queued. The path
+    /// itself is not validated here.
     fn install_dialog(&mut self, ui: &mut egui::Ui, id: &str, folder: &mut String, host: &mut dyn Host) -> bool {
         let Some(app) = self.entry(id).map(|e| e.app) else { return true };
         ui.set_width(440.0f32.min(ui.ctx().content_rect().width() - 80.0));

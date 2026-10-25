@@ -127,6 +127,9 @@ impl LauncherUi {
         );
     }
 
+    /// The language picker. It changes the preference immediately but keeps this pass on a language
+    /// that can be drawn now; a CJK face is installed by the next pass's font gate. When that face
+    /// is unavailable, an English-only notice explains why the interface stays English.
     fn settings_language(&mut self, ui: &mut Ui) {
         let t = Tokens::get(ui.ctx());
         let mut lang_code = self.settings.language.clone();
@@ -162,6 +165,9 @@ impl LauncherUi {
         }
     }
 
+    /// Update scheduling and opt-ins. Values are written live; enabling automatic updates while the
+    /// backend manages apps runs a pass over pending updates at once. The automatic-update checkbox
+    /// is hidden on hosts that cannot manage apps.
     fn settings_updates(&mut self, ui: &mut Ui) {
         sheet::panel(ui, tl!("Updates"), |ui| {
             let mut every = self.settings.check_every;
@@ -289,6 +295,9 @@ impl LauncherUi {
         });
     }
 
+    /// Tray, desktop and login-item choices. The whole panel is omitted when the host cannot manage
+    /// apps or has no tray, desktops and login item; a failed login-item change becomes a UI toast
+    /// instead of being ignored.
     fn settings_background(&mut self, ui: &mut Ui, host: &mut dyn Host) {
         // Nothing to show on a host with no tray, desktops or login item: no empty box.
         if !self.caps.manage_apps || !(host.has_tray() || host.has_desktops() || host.login_item().is_some()) {
@@ -312,6 +321,8 @@ impl LauncherUi {
         });
     }
 
+    /// Community links (Discord, website, GitHub and the social icons) opened through the safe
+    /// external-link path; it queues no app actions.
     fn settings_community(&mut self, ui: &mut Ui) {
         let t = Tokens::get(ui.ctx());
         sheet::panel(ui, tl!("Community"), |ui| {

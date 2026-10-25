@@ -174,6 +174,10 @@ pub fn window_buttons(ui: &mut Ui, height: f32) {
     rule(ui, height);
 }
 
+/// Draws one caption button and returns its click response; the caller sends the viewport
+/// command. Hit-testing excludes the top resize band (and, for close, the right-edge band) so
+/// the window edges stay resizable; when maximized there is no band and close reaches the
+/// corner.
 fn window_button(ui: &mut Ui, button: WindowButton, height: f32) -> Response {
     let t = Tokens::get(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(vec2(46.0, height), Sense::hover());
@@ -629,6 +633,9 @@ fn links_in_order<'l, 'a>(ui: &Ui, links: &'l [IconLink<'a>]) -> Vec<&'l IconLin
     if ui.layout().prefer_right_to_left() { links.iter().rev().collect() } else { links.iter().collect() }
 }
 
+/// Draws one social logo as a link: `Role::Link` with its label and tip, a pointer cursor, and
+/// the safe external opener on click. An unknown social name draws nothing and returns without
+/// a response.
 fn icon_link(ui: &mut Ui, size: f32, link: &IconLink<'_>) {
     let Some(icon) = crate::icons::social(link.name) else { return };
     let t = Tokens::get(ui.ctx());
@@ -691,6 +698,8 @@ mod tests {
         }
     }
 
+    /// The URLs the context has asked to open in its current output, for asserting that the opener
+    /// was (or was not) reached.
     fn opened_urls(ctx: &egui::Context) -> Vec<String> {
         ctx.output(|out| {
             out.commands

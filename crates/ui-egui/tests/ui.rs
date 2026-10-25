@@ -256,6 +256,9 @@ fn harness_with_discord(discord_url: Option<&'static str>) -> (Harness<'static, 
 }
 
 #[allow(clippy::too_many_arguments)] // Test fixture inputs vary independently across existing cases.
+/// Builds a harness with the full fixture matrix (events, view, theme, manage mode, scale, title
+/// bar, pictures, platform and Discord URL), forces English labels, and returns the recorded
+/// commands.
 fn harness_full(
     events: Vec<Event>,
     view: ViewMode,
@@ -325,6 +328,8 @@ fn snapshot(h: &mut Harness<'_, Option<LauncherUi>>, name: &str) {
     img.save(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
 }
 
+/// A managing macOS fixture with a fresh PhotoCraft release and a scripted folder picker, for
+/// the install-folder flow.
 fn folder_harness(picked: Rc<RefCell<Option<String>>>) -> (Harness<'static, Option<LauncherUi>>, Rc<RefCell<Vec<Command>>>) {
     struct Picker(Rc<RefCell<Option<String>>>);
     impl Host for Picker {
@@ -366,6 +371,9 @@ fn install_commands(sent: &RefCell<Vec<Command>>) -> Vec<Command> {
 }
 
 #[test]
+/// A custom-folder install opens a confirmation dialog with no command until Install; the
+/// chosen root and per-app folder are persisted, Configure precedes Install, and Cancel keeps
+/// no override.
 fn a_fresh_install_confirms_the_folder_and_configures_before_installing() {
     let picked = Rc::new(RefCell::new(None));
     let (mut h, sent) = folder_harness(picked.clone());
@@ -535,6 +543,8 @@ fn drive_launcher(launcher: &mut LauncherUi, ctx: &egui::Context, events: Vec<eg
     });
 }
 
+/// Drives one pointer gesture as move, press and release over separate frames, optionally
+/// asking for a discarded second pass on release.
 fn click_steps(launcher: &mut LauncherUi, ctx: &egui::Context, at: egui::Pos2, time: f64, two_passes_on_release: bool) {
     let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
     drive_launcher(launcher, ctx, vec![egui::Event::PointerMoved(at)], time, false);
@@ -542,6 +552,7 @@ fn click_steps(launcher: &mut LauncherUi, ctx: &egui::Context, at: egui::Pos2, t
     drive_launcher(launcher, ctx, vec![button(false)], time + 0.2, two_passes_on_release);
 }
 
+/// Counts the `Install` commands among the recorded backend commands.
 fn install_count(sent: &RefCell<Vec<Command>>) -> usize {
     sent.borrow().iter().filter(|c| matches!(c, Command::Install { .. })).count()
 }
@@ -630,6 +641,8 @@ fn the_same_download_is_sent_once_across_discarded_passes_but_again_next_frame()
 }
 
 #[test]
+/// Clicking Open across a discarded second pass increments the launch counter once for the
+/// visible frame.
 fn opening_an_app_counts_once_across_discarded_passes() {
     let (mut h, _sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(8);
@@ -643,6 +656,8 @@ fn opening_an_app_counts_once_across_discarded_passes() {
 }
 
 #[test]
+/// The real Update button, clicked through AccessKit on every pass, crosses the action boundary
+/// once per frame and again on the next frame.
 fn the_actual_update_button_queues_once_across_a_discarded_pass() {
     let (mut h, sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(8);
@@ -659,6 +674,8 @@ fn the_actual_update_button_queues_once_across_a_discarded_pass() {
 }
 
 #[test]
+/// The real Open button, clicked through AccessKit on every pass, delivers one `Launch` and
+/// increments the count once.
 fn the_actual_open_button_launches_once_across_a_discarded_pass() {
     let (mut h, sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(8);
@@ -674,6 +691,8 @@ fn the_actual_open_button_launches_once_across_a_discarded_pass() {
 }
 
 #[test]
+/// A toast created by logic while no window ran is shown once on the first drawing pass and
+/// expires relative to that pass.
 fn a_job_finished_while_hidden_shows_one_fresh_toast_on_the_next_frame() {
     artcraft_launcher_ui_egui::i18n::set_test_lang(artcraft_launcher_ui_egui::i18n::Lang::EN);
     let sent = Rc::new(RefCell::new(Vec::new()));
@@ -728,6 +747,8 @@ fn a_job_finished_while_hidden_shows_one_fresh_toast_on_the_next_frame() {
 }
 
 #[test]
+/// At 560 px the toolbar's search, refresh, settings, sort and per-app menu keep their
+/// accessible names, with no unnamed input widgets and a strict accessibility pass.
 fn a_narrow_toolbar_names_its_controls_and_passes_strict_accessibility() {
     let (mut h, _sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.set_size(egui::vec2(560.0, 900.0));
@@ -756,6 +777,8 @@ fn install_locations_survive_settings_save_and_older_settings_use_system_default
 }
 
 #[test]
+/// Logic without a window still consumes backend events; attaching to a new window then draws
+/// the update cards.
 fn keeps_working_with_no_window_then_draws_in_a_new_one() {
     let sent = Rc::new(RefCell::new(Vec::new()));
     let backend =
@@ -841,6 +864,8 @@ fn downloads_can_be_paused_resumed_and_discarded() {
 }
 
 #[test]
+/// A kept download offers Retry install (which only opens install) and menu Download again
+/// (Cancel then Install); apps without a kept download do not offer it.
 fn a_kept_download_offers_retry_install_and_download_again() {
     let (mut h, sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(4);
@@ -895,6 +920,8 @@ fn a_dismissed_install_prompt_is_not_called_a_cancelled_download() {
 }
 
 #[test]
+/// A ready update names its version and installs on Retry, while an up-to-date app offers
+/// Reinstall instead of Download again.
 fn a_kept_update_names_its_version_and_an_up_to_date_app_is_not_downloaded_again() {
     let mut ev = events();
     for app in ["effectcraft", "wordcraft"] {
@@ -951,6 +978,7 @@ fn the_launcher_update_waiting_for_other_installs_can_be_cancelled() {
 }
 
 #[test]
+/// The launcher banner's Cancel crosses the action boundary once per visible frame.
 fn the_launcher_banner_cancel_is_sent_once_across_discarded_passes() {
     let mut ev = events();
     ev.push(Event::LauncherUpdate(release("artcraft-launcher", "0.2.0", NOW)));
@@ -1001,6 +1029,8 @@ fn table_view_and_light_theme() {
 }
 
 #[test]
+/// Hide removes an app from All into Hidden Apps; Unhide restores it, clears the hidden set and
+/// returns the filter to All.
 fn hiding_an_app_removes_it_until_it_is_unhidden() {
     let (mut h, _) = harness(ViewMode::Table, egui::Theme::Dark, true);
     h.run_steps(6);
@@ -1027,6 +1057,8 @@ fn hiding_an_app_removes_it_until_it_is_unhidden() {
 }
 
 #[test]
+/// The view switch stores Table, and the table names each app once in its wordmark rather than
+/// again on the decorative icon.
 fn switching_views() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(6);
@@ -1145,6 +1177,8 @@ fn the_first_close_to_the_tray_is_explained_once() {
 }
 
 #[test]
+/// The Settings dialog announces its heading once and shows the community section's Discord
+/// entry alongside the footer's.
 fn settings_link_to_discord() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(6);
@@ -1163,6 +1197,8 @@ fn settings_link_to_discord() {
 }
 
 #[test]
+/// After the taller Settings dialog, the uninstall prompt keeps its own content-sized modal with
+/// its buttons close under the text (#88), and Cancel closes it.
 fn the_uninstall_prompt_keeps_its_own_size_after_a_taller_dialog() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(6);
@@ -1191,6 +1227,8 @@ fn the_uninstall_prompt_keeps_its_own_size_after_a_taller_dialog() {
 }
 
 #[test]
+/// The footer links website and GitHub, cards link only GitHub, and the table menu adds the
+/// app's website and repository.
 fn links_to_the_website_github_and_each_apps_pages() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(6);
@@ -1240,6 +1278,8 @@ fn all_opened(h: &mut Harness<'_, Option<LauncherUi>>, label: &str) -> Vec<Strin
 }
 
 #[test]
+/// Footer, card and social links open their expected pages; one card menu's All releases action
+/// opens a repository releases page.
 fn links_open_the_right_pages() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(6);
@@ -1305,6 +1345,8 @@ fn discord_link_opens_app_when_discord_is_installed() {
 }
 
 #[test]
+/// Background detection waits five minutes: it is not sent at startup or on every frame, and is
+/// sent once at the five-minute mark.
 fn looks_again_at_installed_apps_every_few_minutes_not_every_frame() {
     let sent = Rc::new(RefCell::new(Vec::new()));
     let clock = Rc::new(Cell::new(NOW));
@@ -1336,6 +1378,8 @@ fn looks_again_at_installed_apps_every_few_minutes_not_every_frame() {
 }
 
 #[test]
+/// Update and restart queues `UpdateLauncher`, progress hides the button, and
+/// `LauncherRestarting` asks the host to quit; the update title is announced once.
 fn the_launcher_updates_itself_and_quits_to_restart() {
     struct QuitHost(Rc<Cell<bool>>);
     impl Host for QuitHost {
@@ -1414,6 +1458,8 @@ fn the_launcher_updates_itself_and_quits_to_restart() {
 }
 
 #[test]
+/// A found launcher update opens the relaunch prompt once; Later dismisses it and leaves the
+/// toolbar banner.
 fn launcher_update_prompts_to_relaunch_with_updated_version() {
     let mut ev = events();
     ev.push(Event::LauncherUpdate(release("artcraft-launcher", "0.2.0", NOW)));
@@ -1449,6 +1495,8 @@ fn the_current_desktop_setting_is_only_offered_where_the_os_has_desktops() {
 }
 
 #[test]
+/// A feed alert is acknowledged only by OK (persisted), while an inline announcement stays until
+/// its own Dismiss is clicked.
 fn feed_announcements_and_alerts_show_until_dismissed() {
     use artcraft_launcher_core::feed::Notice;
     let notice = |id: &str, title: &str, link: Option<&str>| Notice {
@@ -1506,6 +1554,8 @@ fn automatic_checks_run_every_five_minutes() {
 }
 
 #[test]
+/// With auto-update on, outdated apps are queued for Install and the launcher for
+/// `UpdateLauncher`.
 fn automatic_updates_queue_installs_for_outdated_apps_and_launcher() {
     let mut ev = events();
     ev.push(Event::LauncherUpdate(release("artcraft-launcher", "0.2.0", NOW)));
@@ -1535,6 +1585,7 @@ fn automatic_updates_queue_installs_for_outdated_apps_and_launcher() {
 }
 
 #[test]
+/// With auto-update off, no app install or launcher update is queued.
 fn automatic_updates_are_disabled_by_default() {
     let mut ev = events();
     ev.push(Event::LauncherUpdate(release("artcraft-launcher", "0.2.0", NOW)));
@@ -1563,6 +1614,8 @@ fn automatic_updates_are_disabled_by_default() {
 }
 
 #[test]
+/// The footer names the release origins actually in use, adding GitHub only when some release
+/// came from there.
 fn the_footer_names_the_services_behind_what_is_on_screen() {
     let footer = |extra: Vec<Event>| {
         let mut evs = events();
@@ -1604,6 +1657,8 @@ fn web_build_offers_downloads() {
 }
 
 #[test]
+/// A custom title bar shows Minimize, Maximize and Close, and Close requests the viewport close
+/// command.
 fn custom_title_bar_has_window_buttons() {
     struct FramelessHost;
     impl Host for FramelessHost {
@@ -1685,6 +1740,8 @@ fn maximized_the_close_button_reaches_the_screens_corner() {
 }
 
 #[test]
+/// Clicking a card opens its details drawer with the page links, wrapping picture arrows and
+/// Esc-to-close.
 fn clicking_a_card_opens_its_details_drawer() {
     let (mut h, _sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(8);
@@ -1855,6 +1912,8 @@ fn a_page_without_pictures_has_no_gallery() {
 }
 
 #[test]
+/// Enlarge adds a second, keyboard-navigable view over the drawer; Esc closes the enlarged
+/// picture before the drawer.
 fn the_lead_picture_can_be_enlarged() {
     let (mut h, _sent) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(8);
@@ -1961,6 +2020,8 @@ fn the_drawer_and_the_enlarged_picture_survive_any_window_size() {
 }
 
 #[test]
+/// At 720–1180 px the rate-limit notice stays readable and clear of the footer's checked time
+/// and eight right-side links.
 fn the_rate_limit_notice_never_runs_under_the_footer_links() {
     for width in [720.0, 960.0, 1180.0] {
         let mut evs = events();
@@ -2009,6 +2070,8 @@ fn the_rate_limit_notice_never_runs_under_the_footer_links() {
 }
 
 #[test]
+/// At 720–1180 px refresh, search, sort and view share one unclipped toolbar row without
+/// overlaps.
 fn toolbar_keeps_navigation_refresh_search_and_view_on_one_unclipped_row() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     for width in [720.0, 800.0, 1180.0] {
@@ -2252,6 +2315,7 @@ fn with_animations_on_hovering_a_card_animates() {
 }
 
 #[test]
+/// Command-plus-wheel over the main UI raises the global zoom factor.
 fn control_wheel_zooms_the_main_ui() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(4);
@@ -2269,6 +2333,8 @@ fn control_wheel_zooms_the_main_ui() {
 }
 
 #[test]
+/// With release notes open, keyboard and wheel zoom change only the notes text (reset works)
+/// while the global zoom stays put and the release heading appears once.
 fn changelog_shortcuts_zoom_only_the_notes_text() {
     let (mut h, _) = harness(ViewMode::Grid, egui::Theme::Dark, true);
     h.run_steps(4);

@@ -216,6 +216,12 @@ const RESCAN_EVERY: i64 = 5 * 60;
 const RESCAN_ON_FOCUS_AFTER: i64 = 30;
 
 impl LauncherUi {
+    /// Builds the UI shell around `backend`: installs the bundled fonts and an available system
+    /// CJK face when the effective language needs it, plus image loaders; snapshots capabilities and
+    /// platform, and migrates the settings in memory. It does not save the migrated settings or
+    /// send `Configure`; [`Self::logic`] sends the configuration and the shell owns persistence.
+    /// `fonts_ready` starts false, so the first `ui` pass is a gate that draws nothing and flushes
+    /// any action queued before it.
     pub fn new(ctx: &egui::Context, backend: Box<dyn Backend>, settings: Settings) -> Self {
         let lang = effective_lang(&settings.language);
         let cjk_font = lang.needs_cjk_font().then_some(lang);
@@ -327,6 +333,9 @@ impl LauncherUi {
         self.pending.push(action);
     }
 
+    /// Queues a backend command at this pass's action boundary. [`Self::flush_actions`] delivers it
+    /// once per visible frame; equal commands queued by distinct controls in one pass are separate
+    /// intents and are both kept.
     pub(crate) fn act_command(&mut self, command: Command) {
         self.act(UiAction::Command(command));
     }
@@ -385,6 +394,9 @@ impl LauncherUi {
         }
     }
 
+    /// Queues a programmatic message made outside the UI action boundary (logic, tray work). It is
+    /// shown by the next pass that can draw, and its expiry starts then; a UI interaction must use
+    /// [`Self::toast_from_ui`] so a discarded pass cannot queue it twice.
     pub(crate) fn toast(&mut self, text: impl Into<String>, error: bool) {
         self.queue_toast(text.into(), error);
     }
@@ -423,6 +435,9 @@ impl LauncherUi {
             && !crate::settings::is_flatpak_sandbox()
     }
 
+    /// Asks to install `id`. On a host that supports custom folders and for an app that is not
+    /// installed, it opens the folder dialog and sends nothing until that is confirmed; otherwise
+    /// it queues `Install` immediately, including for an already installed app (update/reinstall).
     pub(crate) fn install_app(&mut self, id: &str) {
         if !self.custom_install_folders() || self.entry(id).is_some_and(|e| e.installed.is_some()) {
             self.act_command(Command::Install { app: id.to_string() });
@@ -918,6 +933,9 @@ impl LauncherUi {
         }
     }
 
+    /// Draws the toasts and dismisses a clicked one. Drains messages queued since the last drawing
+    /// pass, starting each expiry on this pass, keeps at most four (dropping the oldest), removes
+    /// expired ones, and asks for another frame while any remain; call it once per visible frame.
     fn draw_toasts(&mut self, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         // Logic may have queued these while no UI ran, with an old input time. They start their
@@ -986,18 +1004,24 @@ mod tests {
     }
 
     impl Backend for Recorder {
+        /// Records the command so the test can assert what crossed the UI boundary.
         fn send(&mut self, command: Command) {
             self.sent.borrow_mut().push(command);
         }
+        /// Always empty: the recorder has no events, jobs or pictures.
         fn poll(&mut self) -> Vec<Event> {
             Vec::new()
         }
+        /// No install management, a neutral reveal label and no self-update, so UI paths needing them
+        /// stay off.
         fn capabilities(&self) -> Capabilities {
             Capabilities { manage_apps: false, reveal_label: "Show", self_update: false }
         }
+        /// Reports no platform, so the UI offers no OS-specific package format.
         fn platform(&self) -> Option<Platform> {
             None
         }
+        /// A fixed zero clock; tests that need time drive their own backend.
         fn now(&self) -> i64 {
             0
         }
@@ -1025,6 +1049,7 @@ mod tests {
         output.textures_delta.clear();
     }
 
+    /// Counts the `Install` commands in `sent`, ignoring every other command.
     fn installs(sent: &RefCell<Vec<Command>>) -> usize {
         sent.borrow().iter().filter(|command| matches!(command, Command::Install { .. })).count()
     }
@@ -1043,6 +1068,8 @@ mod tests {
     }
 
     #[test]
+    /// Two controls queueing the same command in one pass are two gestures and must both reach the
+    /// backend.
     fn two_distinct_intents_with_the_same_command_are_both_delivered() {
         let (mut launcher, sent, _ctx) = launcher();
         launcher.frame = Some(1);
@@ -1055,6 +1082,8 @@ mod tests {
     }
 
     #[test]
+    /// A later pass within one visible frame may add genuinely different actions without losing the
+    /// earlier one.
     fn distinct_actions_in_a_later_pass_are_both_delivered() {
         let (mut launcher, sent, _ctx) = launcher();
         launcher.frame = Some(1);
@@ -1075,6 +1104,8 @@ mod tests {
     }
 
     #[test]
+    /// A discarded second pass over the same gesture sends nothing, while the next visible frame
+    /// accepts it again.
     fn a_repeated_pass_sends_nothing_but_a_new_frame_sends_again() {
         let (mut launcher, sent, _ctx) = launcher();
         launcher.frame = Some(1);
@@ -1093,6 +1124,8 @@ mod tests {
     }
 
     #[test]
+    /// A launch increments the persisted counter and sends one `Launch` per visible frame, not per
+    /// pass.
     fn a_launch_count_is_incremented_once_per_visible_frame() {
         let (mut launcher, sent, _ctx) = launcher();
         launcher.frame = Some(1);
@@ -1106,6 +1139,8 @@ mod tests {
     }
 
     #[test]
+    /// The font-gate pass flushes an action queued before it exactly once, and the following pass
+    /// does not repeat it.
     fn a_pending_action_survives_the_fonts_ready_early_return_exactly_once() {
         let (mut launcher, sent, ctx) = launcher();
         // `new` installed the fonts but the first pass cannot draw with them yet.
@@ -1118,6 +1153,7 @@ mod tests {
     }
 
     #[test]
+    /// A toast raised through the UI is queued once even when the same visible frame is drawn twice.
     fn a_ui_toast_is_shown_once_across_passes() {
         let (mut launcher, _sent, _ctx) = launcher();
         launcher.frame = Some(1);
@@ -1129,6 +1165,8 @@ mod tests {
     }
 
     #[test]
+    /// A toast made while no UI ran starts its expiry on the first pass that draws it, not at the
+    /// older logic time.
     fn a_hidden_result_gets_its_expiry_from_the_pass_that_shows_it() {
         let (mut launcher, _sent, ctx) = launcher();
         // The fonts gate pass draws nothing and shows no toast.
@@ -1144,6 +1182,7 @@ mod tests {
     }
 
     #[test]
+    /// Moving to a new window preserves a queued toast that has not yet been shown.
     fn attaching_a_window_keeps_messages_still_waiting_to_be_shown() {
         let (mut launcher, _sent, ctx) = launcher();
         launcher.toast("PhotoCraft updated", false);
@@ -1177,6 +1216,8 @@ mod tests {
         )
     }
 
+    /// Opens Settings and its language combo through visible labels, leaving the picker open for a
+    /// selection.
     fn open_language_picker(h: &mut Harness<'static, Option<LauncherUi>>) {
         use egui_kittest::kittest::Queryable;
         h.get_by_label("Settings").click();
