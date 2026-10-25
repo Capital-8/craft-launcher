@@ -147,7 +147,10 @@ impl LauncherUi {
         });
         if lang_code != self.settings.language {
             self.settings.language = lang_code;
-            crate::i18n::set_current(crate::app::effective_lang(&self.settings.language));
+            // A CJK face selected here is installed at the next pass's font gate; keep this pass on
+            // a language that can be drawn now rather than asking for missing glyphs.
+            crate::i18n::set_current(crate::app::drawable_lang(&self.settings.language, self.cjk_font));
+            ui.ctx().request_repaint();
         }
         let pref = crate::i18n::Lang::from_pref(&self.settings.language);
         if pref.needs_cjk_font() && !theme::cjk_font_available(pref) {

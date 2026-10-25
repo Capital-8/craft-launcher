@@ -201,6 +201,14 @@ pub(crate) fn effective_lang(pref: &str) -> crate::i18n::Lang {
     if lang.needs_cjk_font() && !theme::cjk_font_available(lang) { crate::i18n::Lang::EN } else { lang }
 }
 
+/// The language this frame may draw: a CJK preference only once its own face is installed in the
+/// context, never merely because the system has one. Callers draw with the result, so a language
+/// whose font becomes active only next pass cannot ask this pass for a missing glyph.
+pub(crate) fn drawable_lang(pref: &str, installed: Option<crate::i18n::Lang>) -> crate::i18n::Lang {
+    let lang = crate::i18n::Lang::from_pref(pref);
+    if lang.needs_cjk_font() && installed != Some(lang) { crate::i18n::Lang::EN } else { lang }
+}
+
 /// How often to look again at what's installed, to notice apps installed or removed outside
 /// the launcher. A detection pass lists packages and reads a few files: cheap, but not free.
 const RESCAN_EVERY: i64 = 5 * 60;
@@ -426,7 +434,9 @@ impl LauncherUi {
 
     /// Non-drawing work: runs every frame and also while the window is hidden in the tray.
     pub fn logic(&mut self, ctx: &egui::Context, host: &mut dyn Host) {
-        set_current(crate::i18n::Lang::from_pref(&self.settings.language));
+        // Messages made here (toasts, alerts) are drawn later, so use the language the UI can
+        // actually show: English where the system has no CJK face for the preference.
+        set_current(effective_lang(&self.settings.language));
         self.configure();
         if !self.started {
             self.started = true;
@@ -710,10 +720,9 @@ impl LauncherUi {
         if host.title_bar() == TitleBar::MacOs && ctx.input_mut(|i| i.consume_key(egui::Modifiers::MAC_CMD, egui::Key::M)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
         }
-        // Set the current language for this frame based on settings.
+        // `effective_lang` only picks a CJK language once the system's font has loaded; install
+        // that face now, and draw nothing until the context has switched to it.
         let lang = effective_lang(&self.settings.language);
-        set_current(lang);
-        // `effective_lang` only picks a CJK language once its font has loaded.
         if lang.needs_cjk_font() && self.cjk_font != Some(lang) {
             theme::install_fonts(&ctx, Some(lang));
             self.cjk_font = Some(lang);
@@ -727,6 +736,9 @@ impl LauncherUi {
             self.flush_actions();
             return;
         }
+        // Set the current language only after the font gate: a face installed by `set_fonts`
+        // becomes active next pass, so drawing with it in the pass that installed it would panic.
+        set_current(drawable_lang(&self.settings.language, self.cjk_font));
         self.zoom_input(&ctx);
         if self.applied_theme != Some(self.settings.theme) {
             theme::apply(&ctx, self.settings.theme);
@@ -961,6 +973,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
+    use egui_kittest::Harness;
+
     use super::*;
 
     struct NoHost;
@@ -1013,6 +1027,19 @@ mod tests {
 
     fn installs(sent: &RefCell<Vec<Command>>) -> usize {
         sent.borrow().iter().filter(|command| matches!(command, Command::Install { .. })).count()
+    }
+
+    /// A CJK preference is drawable only while that language's own face is installed: having the
+    /// system font cached, or another script's face installed, is not enough.
+    #[test]
+    fn a_cjk_language_is_drawn_only_with_its_own_installed_face() {
+        use crate::i18n::Lang;
+        assert_eq!(drawable_lang("zh-CN", None), Lang::EN);
+        assert_eq!(drawable_lang("zh-CN", Some(Lang::ZH_CN)), Lang::ZH_CN);
+        assert_eq!(drawable_lang("zh-CN", Some(Lang::JA)), Lang::EN);
+        assert_eq!(drawable_lang("ja", Some(Lang::ZH_CN)), Lang::EN);
+        assert_eq!(drawable_lang("ja", Some(Lang::JA)), Lang::JA);
+        assert_eq!(drawable_lang("fr", Some(Lang::ZH_CN)), Lang::FR);
     }
 
     #[test]
@@ -1122,5 +1149,115 @@ mod tests {
         launcher.toast("PhotoCraft updated", false);
         launcher.attach(&ctx);
         assert_eq!(launcher.pending_toasts.len(), 1, "a message from logic is not tied to the old window");
+    }
+
+    /// A UI driven through the real toolbar → Settings → language picker path, with the test-only
+    /// font seam, so the selected frame and the single font-gate pass can be inspected exactly.
+    fn cjk_picker_harness() -> Harness<'static, Option<LauncherUi>> {
+        let sent = Rc::new(RefCell::new(Vec::new()));
+        let mut backend = Some(Recorder { sent });
+        let settings = Settings { language: "en".into(), notify: false, ..Settings::default() };
+        Harness::builder().with_size(egui::vec2(1180.0, 900.0)).with_theme(egui::Theme::Dark).build_ui_state(
+            move |ui, state: &mut Option<LauncherUi>| {
+                if state.is_none()
+                    && let Some(backend) = backend.take()
+                {
+                    *state = Some(LauncherUi::new(ui.ctx(), Box::new(backend), settings.clone()));
+                }
+                if let Some(launcher) = state.as_mut() {
+                    launcher.logic(&ui.ctx().clone(), &mut NoHost);
+                    // The strict policy covers drawing passes only: translation is what asks the
+                    // fonts for glyphs. Logic may set the current language ahead of the gate, but
+                    // it draws nothing.
+                    let _strict = crate::i18n::StrictCjkDrawing::on(launcher.cjk_font);
+                    launcher.ui(ui, &mut NoHost);
+                }
+            },
+            None,
+        )
+    }
+
+    fn open_language_picker(h: &mut Harness<'static, Option<LauncherUi>>) {
+        use egui_kittest::kittest::Queryable;
+        h.get_by_label("Settings").click();
+        h.run_steps(3);
+        h.get_by_value("English").click();
+        h.run_steps(2);
+    }
+
+    /// Clicks Simplified Chinese and checks the very frame that records it: the frame must still
+    /// draw English and must not have installed a CJK face yet.
+    fn select_chinese_in_its_settings_frame(h: &mut Harness<'static, Option<LauncherUi>>) {
+        use crate::i18n::Lang;
+        use egui_kittest::kittest::Queryable;
+        h.get_by_label("Simplified Chinese").click_accesskit();
+        for _ in 0..4 {
+            h.step();
+            let launcher = h.state().as_ref().expect("harness state");
+            if launcher.settings.language == "zh-CN" {
+                assert_eq!(crate::i18n::current(), Lang::EN, "the selection frame must still draw English");
+                assert_eq!(launcher.cjk_font, None, "the selection frame must not install a face yet");
+                assert!(!crate::i18n::drew_cjk(), "the selection frame must not draw CJK text");
+                return;
+            }
+        }
+        panic!("the picker click must select Simplified Chinese");
+    }
+
+    /// Selecting Simplified Chinese must keep the selection frame itself in English: its face is
+    /// installed at the next pass's font gate, and drawing the chosen language before then asks
+    /// the bundled (CJK-free) fonts for Chinese glyphs. The old `effective_lang` selector sets the
+    /// current language to Chinese inside this frame and fails the strict policy.
+    #[test]
+    fn selecting_chinese_keeps_the_selection_frame_english_until_the_font_gate() {
+        use crate::i18n::Lang;
+        use egui_kittest::kittest::Queryable;
+
+        // Available: the system "has" a Chinese face. The seam's face is the real bundled Inter,
+        // which has no CJK glyphs, so the gate can install a face without faking coverage.
+        {
+            let _fonts = crate::theme::CjkFontOverride::available(Lang::ZH_CN);
+            let mut h = cjk_picker_harness();
+            h.run_steps(8);
+            open_language_picker(&mut h);
+            select_chinese_in_its_settings_frame(&mut h);
+            let marker = crate::theme::cjk_font(Lang::ZH_CN).expect("the seam answers with the bundled face");
+            let inter: &[u8] = include_bytes!("../../../assets/fonts/Inter-Variable.ttf");
+            assert_eq!(marker.bytes(), inter, "the available marker must be the real Inter face, not a CJK face");
+
+            // Exactly one gate pass: it installs the face and draws nothing. We stop here and do
+            // not run the following pass, which would panic on missing Chinese glyphs in the Inter stand-in.
+            h.step();
+            {
+                let launcher = h.state().as_ref().expect("harness state");
+                assert_eq!(launcher.cjk_font, Some(Lang::ZH_CN), "the gate must install the face");
+            }
+            assert!(!crate::i18n::drew_cjk(), "the gate pass must not draw CJK text");
+        }
+
+        // Unavailable: no face at all, so every frame stays English and the gate installs nothing.
+        {
+            let _fonts = crate::theme::CjkFontOverride::unavailable(Lang::ZH_CN);
+            let mut h = cjk_picker_harness();
+            h.run_steps(8);
+            open_language_picker(&mut h);
+            select_chinese_in_its_settings_frame(&mut h);
+            h.run_steps(3);
+            {
+                let launcher = h.state().as_ref().expect("harness state");
+                assert_eq!(crate::i18n::current(), Lang::EN, "without a face, frames stay English");
+                assert_eq!(launcher.cjk_font, None, "without a face, the gate installs nothing");
+            }
+            h.get_by_label_contains("No font for this language was found");
+        }
+    }
+
+    /// The strict policy the regression relies on really rejects CJK text without its face.
+    #[test]
+    #[should_panic(expected = "strict CJK drawing policy")]
+    fn strict_drawing_policy_rejects_cjk_text_without_its_installed_face() {
+        use crate::i18n::Lang;
+        let _guard = crate::i18n::StrictCjkDrawing::on(None);
+        let _ = crate::i18n::tr(Lang::ZH_CN, "Settings");
     }
 }

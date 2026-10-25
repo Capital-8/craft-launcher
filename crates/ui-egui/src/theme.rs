@@ -348,6 +348,13 @@ fn font_definitions(cjk: Option<Lang>) -> FontDefinitions {
 /// The system's font for a CJK language, read once per language (tens of MB). Desktop only: the
 /// web build has none, so CJK text can't be drawn there.
 pub fn cjk_font(lang: Lang) -> Option<Arc<FontData>> {
+    #[cfg(test)]
+    {
+        let overridden = CJK_FONT_OVERRIDE.with(|slot| slot.borrow().as_ref().and_then(|overrides| overrides.get(lang.code()).cloned()));
+        if let Some(font) = overridden {
+            return font;
+        }
+    }
     #[cfg(not(target_arch = "wasm32"))]
     {
         CJK_FONTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(lang.code()).or_insert_with(|| load_cjk(lang)).clone()
@@ -371,6 +378,52 @@ fn load_cjk(lang: Lang) -> Option<Arc<FontData>> {
 #[cfg(not(target_arch = "wasm32"))]
 static CJK_FONTS: std::sync::Mutex<std::collections::BTreeMap<&str, Option<Arc<FontData>>>> =
     std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+#[cfg(test)]
+type CjkFontOverrides = std::collections::BTreeMap<&'static str, Option<Arc<FontData>>>;
+
+// Test-only per-thread answer for cjk_font, scoped by CjkFontOverride.
+#[cfg(test)]
+thread_local! {
+    static CJK_FONT_OVERRIDE: std::cell::RefCell<Option<CjkFontOverrides>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Scopes a test-only answer for [`cjk_font`], restoring the previous answer on drop.
+#[cfg(test)]
+pub(crate) struct CjkFontOverride {
+    previous: Option<CjkFontOverrides>,
+}
+
+#[cfg(test)]
+impl CjkFontOverride {
+    /// The system has a face for `lang`: a real bundled face with no CJK glyphs stands in, so a
+    /// test can prove the font gate installed a face without faking CJK coverage or depending on
+    /// the machine.
+    pub(crate) fn available(lang: Lang) -> Self {
+        const INTER: &[u8] = include_bytes!("../../../assets/fonts/Inter-Variable.ttf");
+        Self::install(lang, Some(Arc::new(FontData::from_static(INTER))))
+    }
+
+    /// The system has no face for `lang`.
+    pub(crate) fn unavailable(lang: Lang) -> Self {
+        Self::install(lang, None)
+    }
+
+    fn install(lang: Lang, font: Option<Arc<FontData>>) -> Self {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert(lang.code(), font);
+        let previous = CJK_FONT_OVERRIDE.with(|slot| slot.borrow_mut().replace(overrides));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for CjkFontOverride {
+    fn drop(&mut self) {
+        CJK_FONT_OVERRIDE.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
 
 /// Has the system font for `lang` already been loaded? Never loads it.
 pub fn cjk_font_loaded(lang: Lang) -> bool {
