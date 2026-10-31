@@ -136,10 +136,6 @@ pub fn install_at(
         return Err(format!("Going back to an older version of {} isn't available for this kind of install yet.", app.name));
     }
     log::info!("{}: starting {} to {} ({})", app.name, if existing.is_some() { "update" } else { "install" }, release.version_label(), kind.label());
-    // An update of an installed MSI may be an all-users one. Say so before the (slow) scope lookup, so
-    // the other updates of this "Update all" wait for it and share one permission prompt.
-    #[cfg(windows)]
-    let mut joined = (kind == PackageKind::Msi && existing.is_some_and(|inst| inst.source == InstallSource::Msi)).then(msi_batch::Joined::join);
     #[cfg(windows)]
     let msi_scope = if kind == PackageKind::Msi {
         let updated = crate::msi_context::update_scope(
@@ -153,23 +149,22 @@ pub fn install_at(
     } else {
         None
     };
+    // Removing, installing and putting back is only safe under one permission prompt, and the only
+    // way to get that was an elevated PowerShell script, which antivirus software reported as a Trojan.
     #[cfg(windows)]
-    if msi_scope != Some(MsiScope::PerMachine) || job.downgrade.is_some() {
-        // A downgrade runs its own remove, install and put-back steps, outside any batch.
-        joined = None;
+    if job.downgrade.is_some() && msi_scope == Some(MsiScope::PerMachine) {
+        return Err(format!("Going back to an older version of {} isn't available for an app installed for all users yet.", app.name));
     }
     // The package to put back comes first: without it, nothing is removed.
     #[cfg_attr(not(windows), allow(unused_variables))]
     let rollback = match job.downgrade {
         Some(Downgrade::Reinstall { previous, asset }) => {
-            let (file, sha256) = download(previous, asset, job)?;
-            Some((file, sha256, previous.version_label()))
+            let (file, _) = download(previous, asset, job)?;
+            Some((file, previous.version_label()))
         }
         Some(Downgrade::KeepOldCopy) | None => None,
     };
-    // The checksum is kept for the Windows all-users route, which checks the held package again.
-    #[cfg_attr(not(windows), allow(unused_variables))]
-    let (file, sha256) = download(release, asset, job)?;
+    let (file, _) = download(release, asset, job)?;
     log::info!("{}: download ready ({}), running installer...", app.name, file.display());
     // Past this point the install can't be interrupted halfway.
     (job.phase)(JobPhase::Installing);
@@ -191,19 +186,17 @@ pub fn install_at(
             // An update lands in the same Windows Installer context as the copy being replaced:
             // per-machine needs elevation, per-user must not duplicate itself per-machine. A
             // fresh install passes no context and takes the package's own default.
-            match (&joined, &rollback) {
-                (_, Some((previous, previous_sha256, previous_version))) => windows::downgrade_msi(
+            match &rollback {
+                Some((previous, previous_version)) => windows::downgrade_msi(
                     app,
-                    windows::Package { file: &file, sha256: &sha256, version: &version },
-                    windows::Package { file: previous, sha256: previous_sha256, version: previous_version },
+                    windows::Package { file: &file, version: &version },
+                    windows::Package { file: previous, version: previous_version },
                     destination.as_deref(),
                     msi_scope,
                     job.stop,
                     &mut *job.phase,
                 ),
-                // All-users updates that are ready together share one permission prompt.
-                (Some(joined), None) => windows::run_msi_all_users(&file, &sha256, destination.as_deref(), joined, job.stop, &mut *job.phase),
-                (None, None) => windows::run_msi(&file, destination.as_deref(), msi_scope, job.stop, &mut *job.phase),
+                None => windows::run_msi(&file, destination.as_deref(), msi_scope, job.stop, &mut *job.phase),
             }
             .map(|_| None)
         }
@@ -976,16 +969,14 @@ fn root_outcome(code: Option<i32>) -> Result<(), String> {
     }
 }
 
-/// How the error of an installer call shared by several apps ends (see `linux::shared_outcome` and
-/// `msi_batch::outcome`). "In one go" covers a Linux package call, a Windows batch under one
-/// prompt, and its fallback where each package ran by itself but the run still has one result.
+/// How the error of an installer call shared by several apps ends (see `linux::shared_outcome`).
 const SHARED_CALL: &str = "apps in one go. Try them one at a time.";
 
 /// Whether an install failed in one installer call shared with other apps (Linux packages
-/// installed together, or Windows all-users updates under one permission prompt). Such a call can
-/// fail after it has installed some of its apps; any other failure is the app's own.
+/// installed together). Such a call can fail after it has installed some of its apps; any other
+/// failure is the app's own.
 pub fn failed_in_shared_call(error: &str) -> bool {
-    cfg!(any(target_os = "linux", windows)) && error.ends_with(SHARED_CALL)
+    cfg!(target_os = "linux") && error.ends_with(SHARED_CALL)
 }
 
 /// The system's installer runs one job at a time; the others wait their turn here.
@@ -1927,7 +1918,7 @@ mod freebsd {
 }
 
 /// What a Windows Installer exit code means for the job that ran it.
-#[cfg(any(windows, test))]
+#[cfg(windows)]
 fn explain(code: Option<i32>) -> Result<(), String> {
     match code {
         Some(0 | 3010 | 1641) => Ok(()),
@@ -1938,10 +1929,6 @@ fn explain(code: Option<i32>) -> Result<(), String> {
         None => Err("the Windows Installer was interrupted".into()),
     }
 }
-
-/// One permission prompt for several all-users updates.
-#[cfg(any(windows, test))]
-mod msi_batch;
 
 /// Going back to an older version of a Windows Installer app.
 #[cfg(any(windows, test))]
@@ -1982,8 +1969,8 @@ pub mod windows {
     use artcraft_launcher_core::protocol::CANCELLED;
 
     use super::{
-        CraftApp, INSTALLER, JobPhase, MsiScope, Path, PathBuf, Stop, cancelled, explain, msi_batch, msi_command, msi_downgrade, msi_folder_argument,
-        msi_log, msi_scope_arguments, process, turn,
+        CraftApp, INSTALLER, JobPhase, MsiScope, Path, PathBuf, Stop, cancelled, explain, msi_command, msi_downgrade, msi_folder_argument, msi_log,
+        msi_scope_arguments, process, turn,
     };
 
     fn msiexec() -> PathBuf {
@@ -2021,53 +2008,6 @@ pub mod windows {
         })
     }
 
-    /// Updates an app installed for all users. Jobs that are ready together go into one call, so Windows
-    /// asks for permission once for all of them; one that is alone runs as [`run_msi`] does.
-    /// `sha256` is the checksum the download was checked against: the package is held unchangeable
-    /// and checked again before it waits, and stays held until its call ends.
-    pub(super) fn run_msi_all_users(
-        msi: &Path,
-        sha256: &str,
-        destination: Option<&Path>,
-        joined: &msi_batch::Joined<'_>,
-        stop: &Stop,
-        phase: &mut dyn FnMut(JobPhase),
-    ) -> Result<(), String> {
-        let _held = msi_batch::hold(msi, sha256)?;
-        let scope = Some(MsiScope::PerMachine);
-        run_all_users_with(msi, destination, joined, stop, phase, &|| run_direct(msi, destination, scope), &|targets| {
-            msi_batch::run(&msiexec(), targets)
-        })
-    }
-
-    /// [`run_msi_all_users`] with the two ways of installing handed in: `alone` for a job that is the
-    /// only one in its call, `together` for the command lines of every job of a call of several.
-    pub(super) fn run_all_users_with(
-        msi: &Path,
-        destination: Option<&Path>,
-        joined: &msi_batch::Joined<'_>,
-        stop: &Stop,
-        phase: &mut dyn FnMut(JobPhase),
-        alone: &dyn Fn() -> Result<(), String>,
-        together: &dyn Fn(&[std::ffi::OsString]) -> Result<(), String>,
-    ) -> Result<(), String> {
-        use std::ffi::OsString;
-        let line = msi_batch::line(msi, destination, Some(MsiScope::PerMachine))?;
-        INSTALLER.batched_when(
-            vec![OsString::from(msi_batch::COMMAND)],
-            OsString::from(line),
-            &cancelled(stop),
-            &mut turn(phase, JobPhase::Installing),
-            &|_, targets| match targets {
-                [_one] => alone(),
-                _ => together(targets),
-            },
-            // Queued: this job's package is ready, so the others need not wait for it any more.
-            &|| joined.arrived(),
-            &|_| msi_batch::everyone_here(),
-        )
-    }
-
     /// Runs the launcher's own new MSI for a self-update, with the same progress window and no
     /// restart as [`run_msi`], and waits for it.
     pub fn reinstall(msi: &Path) -> Result<(), String> {
@@ -2081,21 +2021,17 @@ pub mod windows {
         INSTALLER.alone(&cancelled(stop), &mut turn(phase, working), work).unwrap_or_else(|| Err(CANCELLED.into()))
     }
 
-    /// Goes back to `chosen` (its package and version) from a newer installed copy, which the app
-    /// packages won't install over: removes it, installs `chosen` in the same folder and context,
-    /// and puts `previous` back from its package if that does not finish (see [`msi_downgrade`]).
     /// A downloaded package checked against its release checksum, and its version.
     pub(super) struct Package<'a> {
         pub file: &'a Path,
-        pub sha256: &'a str,
         pub version: &'a str,
     }
 
-    /// Goes back to `chosen` from a newer installed copy, which the app packages won't install
-    /// over: removes it, installs `chosen` in the same folder and context, and puts `previous`
-    /// back if that does not finish (see [`msi_downgrade`]). An all-users copy does all three
-    /// under one permission prompt, or not at all; a per-user copy needs none, and runs them one
-    /// by one in a single turn of the installer queue.
+    /// Goes back to `chosen` from a newer per-user copy, which the app packages won't install over:
+    /// removes it, installs `chosen` in the same folder and context, and puts `previous` back if
+    /// that does not finish (see [`msi_downgrade`]). All in one turn of the installer queue: once
+    /// the copy is removed, nothing waiting in the queue (another install, or a cancel while
+    /// waiting) can stop the put-back.
     pub(super) fn downgrade_msi(
         app: &CraftApp,
         chosen: Package<'_>,
@@ -2105,20 +2041,6 @@ pub mod windows {
         stop: &Stop,
         phase: &mut dyn FnMut(JobPhase),
     ) -> Result<(), String> {
-        if scope == Some(MsiScope::PerMachine) {
-            let mut elevated = None;
-            in_turn(stop, phase, JobPhase::Installing, || {
-                elevated = downgrade_elevated(app, &chosen, &previous, destination, scope)?;
-                Ok(())
-            })?;
-            // Separate prompts are no fallback: refusing a later one would leave no app at all.
-            return match elevated {
-                Some(ended) => msi_downgrade::report(ended, app.name, chosen.version, previous.version),
-                None => Err(msi_downgrade::no_session(app.name, chosen.version)),
-            };
-        }
-        // One turn for all three steps: once the copy is removed, nothing waiting in the queue
-        // (another install, or a cancel while waiting) can stop the put-back.
         in_turn(stop, phase, JobPhase::Installing, || {
             msi_downgrade::run(msi_downgrade::Steps {
                 app: app.name,
@@ -2129,45 +2051,6 @@ pub mod windows {
                 reinstall_previous: &mut || run_direct(previous.file, destination, scope),
             })
         })
-    }
-
-    /// The one-prompt route: both packages held unchanged and checked again, then one elevated
-    /// session removes, installs and if needed puts back. `None` when that session can't start.
-    fn downgrade_elevated(
-        app: &CraftApp,
-        chosen: &Package<'_>,
-        previous: &Package<'_>,
-        destination: Option<&Path>,
-        scope: Option<MsiScope>,
-    ) -> Result<Option<msi_downgrade::Ended>, String> {
-        let _held = (msi_batch::hold(chosen.file, chosen.sha256)?, msi_batch::hold(previous.file, previous.sha256)?);
-        let installs = crate::detect::windows::msi_installs(app);
-        if installs.is_empty() {
-            return Err(format!("{} isn't registered with the Windows Installer", app.name));
-        }
-        let removals = installs.iter().map(|m| msi_downgrade::removal(&m.product_code)).collect::<Result<Vec<_>, _>>()?;
-        let script = msi_downgrade::script(
-            msi_batch::text(&msiexec())?,
-            &removals,
-            &msi_batch::line(chosen.file, destination, scope)?,
-            &msi_batch::line(previous.file, destination, scope)?,
-        );
-        let root =
-            std::env::var_os("SystemRoot").map(PathBuf::from).filter(|root| root.is_absolute()).ok_or("SystemRoot is not set to an absolute path")?;
-        let powershell = root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-        let mut command = process::command(&powershell);
-        command
-            .args(["-NoProfile", "-NonInteractive", "-Command"])
-            .arg(msi_batch::outer_script(msi_batch::text(&powershell)?, &msi_batch::encoded(&script)));
-        log::info!("{}: going back to {} under one permission prompt", app.name, chosen.version);
-        let ended = match command.status() {
-            Ok(status) => msi_downgrade::ended(status.code()),
-            Err(e) => {
-                log::warn!("couldn't start PowerShell ({e})");
-                msi_downgrade::Ended::LaunchFailed
-            }
-        };
-        Ok((ended != msi_downgrade::Ended::LaunchFailed).then_some(ended))
     }
 
     pub fn uninstall_msi(app: &CraftApp, stop: &Stop, phase: &mut dyn FnMut(JobPhase)) -> Result<(), String> {
